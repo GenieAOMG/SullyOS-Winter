@@ -21,8 +21,8 @@
 //   用户在 Settings → Instant Push 里生成；Proactive 和 Instant 共用同一份
 //   VAPID，避免两边互相 unsubscribe 抢同一个 pushManager 订阅。
 // ═══════════════════════════════════════════════════════════════════
-const WORKER_URL = 'https://noir2.cc.cd';
-const CLIENT_TOKEN = 'weqwqewqeqwdcsccagdgs32132';
+const WORKER_URL = 'https://proactive-push.czbrovo.workers.dev';
+const CLIENT_TOKEN = 'Uh2gJ75C5vaJ4JybVj6tSoLvPwpVn7x5ZTtwzJ1vQBUx';
 // ═══════════════════════════════════════════════════════════════════
 
 import { loadPushVapid, isPushVapidReady } from './pushVapid';

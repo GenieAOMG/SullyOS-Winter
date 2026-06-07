@@ -15,7 +15,7 @@ import { Capacitor, CapacitorHttp } from '@capacitor/core';
 
 import { CloudBackupConfig, CloudBackupFile } from '../types';
 
-const WORKER_URL = 'https://sullymeow.ccwu.cc';
+const WORKER_URL = 'https://wintersf.czbrovo.workers.dev';
 
 const isNative = (): boolean => {
     try {

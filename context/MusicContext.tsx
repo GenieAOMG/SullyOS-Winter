@@ -82,7 +82,7 @@ const loadLocalAlbum = (): Song[] => {
 const saveLocalAlbum = (songs: Song[]) => {
   try { localStorage.setItem(LS_LOCAL_ALBUM_KEY, JSON.stringify(songs)); } catch {}
 };
-const DEFAULT_WORKER = 'https://sullymeow.ccwu.cc';
+const DEFAULT_WORKER = 'https://wintersf.czbrovo.workers.dev';
 
 export const MUSIC_DEFAULT_CFG: MusicCfg = {
   workerUrl: DEFAULT_WORKER,
@@ -92,7 +92,7 @@ export const MUSIC_DEFAULT_CFG: MusicCfg = {
 
 /* ───────────── 工具 ───────────── */
 // 旧 worker 域名 → 新自定义域名的迁移表。老用户 localStorage 里存的还是
-// sully-n.qegj567.workers.dev，国内访问超时；自定义域名走 CF 边缘到同一个
+// sully-n.qegj567.workers.dev，国内访问超时；新部署的 Worker 走 CF 边缘到同一个
 // worker，行为一致。第一次读到自动改写并落盘，下次刷新就稳定了。
 const STALE_WORKER_HOSTS = [/sully-n\.qegj567\.workers\.dev/i];
 const migrateWorkerUrl = (url: string | undefined): string => {

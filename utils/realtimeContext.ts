@@ -79,7 +79,7 @@ export const defaultRealtimeConfig: RealtimeConfig = {
     notionApiKey: '',
     notionDatabaseId: '',
     xhsEnabled: false,
-    xhsMcpConfig: { enabled: false, serverUrl: 'https://sullymeow.ccwu.cc/api', cookie: undefined, loggedInNickname: undefined, loggedInUserId: undefined, userXsecToken: undefined },
+    xhsMcpConfig: { enabled: false, serverUrl: 'https://wintersf.czbrovo.workers.dev/api', cookie: undefined, loggedInNickname: undefined, loggedInUserId: undefined, userXsecToken: undefined },
     cacheMinutes: 30
 };
 
@@ -301,7 +301,7 @@ export const RealtimeContextManager = {
     fetchBraveNews: async (apiKey: string): Promise<NewsItem[]> => {
         try {
             // 使用自建的 Cloudflare Worker 代理
-            const workerUrl = 'https://sullymeow.ccwu.cc/news?q=热点新闻&count=5&country=cn';
+            const workerUrl = 'https://wintersf.czbrovo.workers.dev/news?q=热点新闻&count=5&country=cn';
 
             const response = await fetch(workerUrl, {
                 headers: {
@@ -622,7 +622,7 @@ export const RealtimeContextManager = {
 
         try {
             // 使用自建的 Cloudflare Worker 代理
-            const workerUrl = `https://sullymeow.ccwu.cc/search?q=${encodeURIComponent(query)}&count=5`;
+            const workerUrl = `https://wintersf.czbrovo.workers.dev/search?q=${encodeURIComponent(query)}&count=5`;
 
             const response = await fetch(workerUrl, {
                 method: 'GET',
@@ -697,7 +697,7 @@ export interface DiaryPreview {
 export const NotionManager = {
 
     // Worker 代理地址
-    WORKER_URL: 'https://sullymeow.ccwu.cc',
+    WORKER_URL: 'https://wintersf.czbrovo.workers.dev',
 
     /**
      * 测试 Notion 连接（通过 Worker 代理）
@@ -1734,7 +1734,7 @@ function formatFeishuDiaryContent(content: string, mood?: string, characterName?
 
 export const FeishuManager = {
 
-    WORKER_URL: 'https://sullymeow.ccwu.cc',
+    WORKER_URL: 'https://wintersf.czbrovo.workers.dev',
 
     /**
      * 获取飞书 tenant_access_token（通过 Worker 代理，带缓存）
