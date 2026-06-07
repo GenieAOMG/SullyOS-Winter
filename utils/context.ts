@@ -107,10 +107,10 @@ export const ContextBuilder = {
             headerOverride?: string;
         },
     ): string => {
-        let context = `${groupOptions?.headerOverride ?? '[System: Roleplay Configuration]'}\n\n`;
+        let context = `${groupOptions?.headerOverride ?? '[System: Identity & Relationship Profile]'}\n\n`;
 
         // 1. 核心身份 (Identity)
-        context += `### 你的身份 (Character)\n`;
+        context += `### 你的身份 (Identity)\n`;
         context += `- 名字: ${char.name}\n`;
         // Change: Explicitly label description as User Note to avoid literal interpretation
         context += `- 用户备注/爱称 (User Note/Nickname): ${char.description || '无'}\n`;
