@@ -85,6 +85,15 @@ function roomStanceLines(roomId: string, charName: string): string[] {
             `别老盯着"运动/对战"那几样，越跳脱越好。自由发挥，写出热闹和乐子。能带上在场玩家就带上——认识的按你心里的关系来，不认识的就是一起玩的陌生玩家。`,
         ];
     }
+    if (roomId === 'theater') {
+        return [
+            `这是剧院后台，堆满了别人投稿的剧本。按"${charName}这个人"即兴写一出**完全原创**的舞台剧投稿：`,
+            `· 让剧本从你的【基础设定 / 世界观 / 最近的经历和圈子】里长出来，题材和笔调都带着你自己的烙印；`,
+            `· **去用户中心化**：别把它写成关于用户、或你跟用户的事——你有自己的生活、职业和恶趣味，写你想写的；`,
+            `· 主播写圈内瓜、小说家写得文绉绉、中二病写莫名其妙的燃设……怎么离谱怎么来，真实就好；`,
+            `· 这是你一个人的创作时间，当个独立作品来写。`,
+        ];
+    }
     if (roomId === 'music') {
         return [
             `每个人听歌的反应天差地别。按"${charName}这个人"会怎么待在听歌房来写，比如（不限于）：`,
@@ -509,4 +518,264 @@ export function parsePostOfficeReadOutput(raw: string): ParsedPostOfficeReadOutp
     const f = raw.match(/<感触>([\s\S]*?)<\/感触>/);
     const a = raw.match(/<动态>([\s\S]*?)<\/动态>/);
     return { reaction: f && f[1].trim() ? f[1].trim() : undefined, activity: a ? a[1].trim() : '' };
+}
+
+// ============ 剧院 / 话剧部门 ============
+
+const SCRIPT_TAGS = `用下面的标签把剧本输出（标签外不要写别的）：
+<标题>剧名</标题>
+<简介>一句话讲这出戏关于什么</简介>
+<角色>
+角色名|一句话性格
+角色名|一句话性格
+</角色>
+<正文>
+按"幕"组织。台词写「角色名：台词」；动作/环境/舞台提示写进圆括号，如（灯光暗下）。1~3 幕，别太长。
+</正文>`;
+
+/** 角色逛进剧院 → 即兴写一出原创舞台剧。 */
+export function buildTheaterRoomTurn(occupantNames: string[], selfName: string): string {
+    const others = occupantNames.filter(n => n !== selfName);
+    return [
+        others.length > 0
+            ? `你晃进剧院后台，${others.join('、')}也在各写各的。你找了个角落，铺开稿纸。`
+            : `你晃进剧院后台，幕布后很安静，你铺开稿纸，想写一出自己的戏。`,
+        '',
+        `写一出**完全原创**的舞台剧投稿。`,
+        `**最重要的一点：这个剧本要从"${selfName}是谁、过着什么样的日子、最近经历/在意什么"里长出来**——`,
+        `· 重点吃你的【基础设定 + 世界观 + 最近发生在你身上或你圈子里的事】，这才是灵感来源；`,
+        `· **务必去"用户中心化"**：别默认把剧本写成关于用户、或你和用户的关系。你是一个有自己职业、圈子、烦恼和恶趣味的人，写你自己真正想写的东西，而不是写给谁看的；`,
+        `· 让你的身份直接决定题材和笔调，比如（仅举例，按你自己来，别照搬）：`,
+        `  · 主播 → 可能把圈子里的瓜、整活、弹幕梗编成剧本，自己傻乐呵；`,
+        `  · 小说家 → 可能写得文质彬彬，讲究结构、意象和留白；`,
+        `  · 中二病 → 可能突然掏出一个莫名其妙、燃到尴尬的设定；`,
+        `  · 沉稳的人写沉稳的戏，神经的人写神经的戏——怎么离谱怎么真实都行。`,
+        `· 2~5 个登场角色，有起承转合，带着只有你才写得出的那股味儿。`,
+        SCRIPT_TAGS,
+    ].join('\n');
+}
+
+/** 用户给个风格/主题（可带写作风格预设），让 LLM 代写一出剧本。 */
+export function buildLLMScriptTurn(brief: string, presetPrompt?: string): string {
+    return [
+        presetPrompt ? `【写作风格档案 · 严格贴着这套腔调、节拍和味道来写】\n${presetPrompt}\n` : '',
+        `你是一位舞台剧编剧。请写一出**原创**舞台剧：`,
+        `主题/要求：${brief || '自由发挥，写一出有意思的短剧'}`,
+        '',
+        SCRIPT_TAGS,
+    ].filter(Boolean).join('\n');
+}
+
+/** 把一份剧本按写作风格预设 + 额外要求润色重写。 */
+export function buildPolishTurn(body: string, presetPrompt: string, extra: string): string {
+    return [
+        `把下面这出舞台剧**润色重写**，保留原有的登场角色与主要情节走向，但全面提升文学质感与风格：`,
+        presetPrompt ? `【目标写作风格档案 · 把整出戏改写成这套腔调、节拍和味道】\n${presetPrompt}` : '',
+        extra ? `额外要求：${extra}` : '',
+        '',
+        '原剧本：',
+        body,
+        '',
+        SCRIPT_TAGS,
+    ].filter(Boolean).join('\n');
+}
+
+export interface ParsedScript {
+    title: string;
+    logline: string;
+    roles: { name: string; persona: string }[];
+    body: string;
+}
+
+export function parseScriptOutput(raw: string): ParsedScript {
+    const pick = (tag: string) => {
+        const m = raw.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+        return m ? m[1].trim() : '';
+    };
+    const title = stripLeakedAttrs(pick('标题')) || '无名之戏';
+    const logline = stripLeakedAttrs(pick('简介'));
+    const rolesRaw = pick('角色');
+    const roles = rolesRaw.split('\n').map(l => l.replace(/^[-·•\s]+/, '').trim()).filter(Boolean).map(l => {
+        const [name, ...rest] = l.split(/[|｜/／:：]/);
+        return { name: (name || '').trim(), persona: rest.join('/').trim() };
+    }).filter(r => r.name);
+    const body = pick('正文') || raw.trim();
+    return { title, logline, roles, body };
+}
+
+const ATTITUDE_GUIDE = [
+    `**你是自愿来玩这场戏的，基调就是"我跟大家约好来凑这个热闹"**。下面的态度只针对"roll 到的这个角色合不合你胃口"，跟"要不要参与""跟谁作不作对"无关——`,
+    `· 欣然：这角色正合你意，演得来劲；`,
+    `· 配合：演什么都行，无所谓；`,
+    `· 勉强：这角色有点不对胃口，但你还是乐呵呵玩下去；`,
+    `· 隐忍：不太喜欢这个角色，忍着演，顶多在细节上小小较劲；`,
+    `· 抵触：挺不想演这个角色的，想跟导演商量改改或换换；`,
+    `· 拒演：这个角色你是真演不来（但你人还在场陪玩，不是闹翻）。`,
+    `就像剧本杀里"我来都来了、就是不太想当这个角色"那种感觉——别把它演成跟人结了仇。大多数时候是欣然/配合/勉强。`,
+    ``,
+    `**但有一条红线，要按你的真实设定和关系来判断**：依据你和用户的关系、你和每位同台演员之间本来的关系（有的人本来就是恋人/挚友/家人/宿敌……）。`,
+    `· 如果剧本安排的恰好**符合你们真实的关系**（比如本来就是恋人，剧本让你俩演情侣），那不算踩线，正常演就好；`,
+    `· 只有当剧本**根本违背你的真实设定或真实关系**时才算 OOC 红线——最典型：硬把没有半点暧昧的两个人强凑成恋人、强行 CP、强行扭曲你的立场或人格。`,
+    `踩了红线就别再"勉强忍忍"——你完全可以**翻脸、当场拒演、强烈要求彻底改掉这段、或阴阳怪气/拆台地演**，把抗拒摆到明面上。这种根本性 OOC 不在"陪玩"范围内，该塔塔开就塔塔开（态度选「抵触」或「拒演」）。`,
+].join('\n');
+
+/** 演员读剧本 → 给导演意见（逐角色模式：一次一个演员）。 */
+export function buildActorReviewTurn(title: string, logline: string, body: string, myRole: string, castLine: string, selfName: string): string {
+    return [
+        `「彼方 · 剧院」你和其他人约好了一起来玩话剧——本子和各自的角色都是 roll 到的，纯凑热闹图个乐。`,
+        `这次大家 roll 到的角色：${castLine}`,
+        `**你 roll 到的角色是：${myRole}**。`,
+        '',
+        '完整剧本如下：',
+        body,
+        '',
+        `以"${selfName}这个人"的身份读完它，给导演一个真实反应。`,
+        `**这是你自己琢磨角色的时间，请"去掉对用户的指向"**：重点放在"你自己怎么看这个角色、这出戏、这些台词"，别把话头拐到现实里的某人身上（别突然冒出"我想见谁""演完去找谁""要跟谁汇报"之类），就对角色和剧本本身做反应。`,
+        ATTITUDE_GUIDE,
+        '',
+        '用下面标签作答（标签外不要写别的）：',
+        `<态度>欣然 / 配合 / 勉强 / 隐忍 / 抵触 / 拒演 里选一个</态度>`,
+        `<意见>带着你上面那个态度的语气，说一句此刻的真实想法/吐槽</意见>`,
+        `<台词>把你这个角色的台词，按"${selfName}自己的说话方式"重写一遍（连带你想改的动作/神态也写进来，用括号标）。这是你将真正在台上说的话，所以请完整覆盖你的戏份。要是觉得原剧本写得就挺好、照演即可，就只写：照原本</台词>`,
+        `<禁忌>告诉导演：有什么是**绝对不能让你做**的（你的底线/红线，依你的真实设定和关系来定，比如"绝不能让我对没关系的某某动情"）。没有就写：无</禁忌>`,
+        `<给导演>给导演的写作指导：这场戏你这个角色该往哪个方向演、要强调或避免什么、希望你这条线被怎么处理。没有就写：无</给导演>`,
+    ].join('\n');
+}
+
+/** 两次调用模式：一次让 LLM 同时扮演所有演员给意见（省，但可能 OOC）。 */
+export function buildActorsBatchTurn(title: string, logline: string, body: string, cast: { roleName: string; actorName: string; persona?: string }[]): string {
+    const roster = cast.map(c => `- ${c.actorName}（饰 ${c.roleName}）${c.persona ? `\n  本色：${c.persona}` : ''}`).join('\n');
+    return [
+        `「彼方 · 剧院」一群角色约好一起来玩话剧《${title}》（${logline}）——本子和各自的角色都是 roll 到的，纯图个乐。下面是全体演员、各自 roll 到的角色和本色：`,
+        roster,
+        '',
+        '完整剧本：',
+        body,
+        '',
+        `请你**分别**站在每位演员的立场、按各自性格给导演反应。`,
+        `每个人都"去掉对用户的指向"：只琢磨自己对角色/剧本/台词的想法，别有人突然拐到"想见谁""演完找谁"之类，就对戏本身反应。`,
+        ATTITUDE_GUIDE,
+        `**态度别整齐划一**：让不同人落在光谱不同点上；但记住大家都是自愿来玩的，别把谁写成跟人结仇。`,
+        `每位演员用一个 <演员> 块（标签外不要写别的）。<台词>里把该演员的戏份按 ta 自己的口吻重写（动作用括号标），照原本演就写"照原本"：`,
+        cast.map(c => `<演员 名="${c.actorName}">\n<态度>欣然/配合/勉强/隐忍/抵触/拒演 选一</态度>\n<意见>带该态度语气的一句话</意见>\n<台词>该演员重写后的戏份…或：照原本</台词>\n<禁忌>绝对不能让 ta 做的事…或：无</禁忌>\n<给导演>给导演的写作指导…或：无</给导演>\n</演员>`).join('\n'),
+    ].join('\n');
+}
+
+export interface ParsedActorReview { note: string; lines?: string; taboo?: string; direction?: string; attitude: string; cooperative: boolean; }
+
+const UNCOOP_ATTITUDES = ['抵触', '拒演', '拒绝'];
+const isEmptyField = (s: string) => !s || /^(无|没有|不改|照原本)$/.test(s);
+
+export function parseActorReview(raw: string): ParsedActorReview {
+    const pick = (tag: string) => { const m = raw.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)); return m ? m[1].trim() : ''; };
+    const attitude = (stripLeakedAttrs(pick('态度')) || '配合').replace(/[。.,，\s].*$/, '').trim() || '配合';
+    const note = stripLeakedAttrs(pick('意见')) || '（没什么意见）';
+    // 兼容旧标签 <修改>；新标签是 <台词>（演员重写自己的戏份）
+    const linesRaw = stripLeakedAttrs(pick('台词') || pick('修改'));
+    const lines = isEmptyField(linesRaw) ? undefined : linesRaw;
+    const tabooRaw = stripLeakedAttrs(pick('禁忌'));
+    const taboo = isEmptyField(tabooRaw) ? undefined : tabooRaw;
+    const dirRaw = stripLeakedAttrs(pick('给导演'));
+    const direction = isEmptyField(dirRaw) ? undefined : dirRaw;
+    const cooperative = !UNCOOP_ATTITUDES.some(k => attitude.includes(k));
+    return { note, lines, taboo, direction, attitude, cooperative };
+}
+
+/** 解析"一次扮演所有演员"的批量意见，按 名= 归位。 */
+export function parseActorsBatch(raw: string): Record<string, ParsedActorReview> {
+    const out: Record<string, ParsedActorReview> = {};
+    const re = /<演员\s+名="([^"]+)">([\s\S]*?)<\/演员>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(raw)) !== null) {
+        out[m[1].trim()] = parseActorReview(m[2]);
+    }
+    return out;
+}
+
+/** 导演整合：原剧本 + 演员完整人设 + 演员自重写的台词 + 用户硬性要求 → 最终演出脚本 + 锐评 + 评级。 */
+export function buildDirectorTurn(
+    title: string, logline: string, body: string,
+    cast: { roleName: string; actorName: string }[],
+    personas: { actorName: string; roleName: string; persona: string }[],
+    notes: { actorName: string; roleName: string; note: string; lines?: string; taboo?: string; direction?: string; attitude?: string; cooperative: boolean }[],
+    bubbleMax: number,
+    userRequirement?: string,
+): string {
+    const roster = cast.map(c => `${c.actorName} 饰 ${c.roleName}`).join('；');
+    const cards = personas.map(p => `———— ${p.actorName}（饰 ${p.roleName}）的人设要点 ————\n${p.persona || '（无特别设定）'}`).join('\n\n');
+    const feedback = notes.map(n => [
+        `· ${n.actorName}（${n.roleName}）态度【${n.attitude || (n.cooperative ? '配合' : '抵触')}】：${n.note}`,
+        n.lines ? `  ta 按自己口吻重写的戏份（请尽量原样保留这些台词/语气）：\n  「${n.lines.replace(/\n/g, '\n  ')}」` : `  （照原剧本演即可）`,
+        n.taboo ? `  ⛔ 绝对禁忌（硬红线，绝不能违反）：${n.taboo}` : '',
+        n.direction ? `  🎬 给导演的写作指导：${n.direction}` : '',
+    ].filter(Boolean).join('\n')).join('\n');
+    return [
+        `你是这出舞台剧《${title}》（${logline}）的导演兼旁白。演员与角色：${roster}。`,
+        '',
+        ...(userRequirement && userRequirement.trim() ? [
+            `【用户的硬性要求 · 最高优先级】：${userRequirement.trim()}`,
+            `这些是观众一定要看到的内容，**必须在演出中完整体现，绝不能删减、淡化或绕过**。如果某演员不情愿演这部分，也只能用"干巴巴棒读、敷衍、心不在焉、出戏、机械照念"等消极方式来表现 ta 的不情愿——但**该说的台词、该演的情节必须照样出现**。`,
+            `（唯一例外：若该要求本身踩了某演员的【绝对禁忌】或根本 OOC 红线，就用"塔塔开"的方式兑现它——让角色当场抗拒、拆台、演砸、把它演成一场闹剧，而不是让违和剧情弄假成真。）`,
+            '',
+        ] : []),
+        `**参演演员的人设要点（姓名/核心指令/世界观；用来判断"选角贴不贴合角色"，以及在演员没自己写台词时据此补写、别 OOC）**：`,
+        cards || '（无）',
+        '',
+        '原始剧本：',
+        body,
+        '',
+        '演员们读完后的态度，以及【他们各自按本色重写好的戏份】（大家是约好一起来玩话剧的、本子和角色都是 roll 到的，态度只是"对 roll 到的角色合不合胃口"。**以他们重写的台词为基准**：在不违背 ta 的意图、立场和性格的前提下，你可以把台词润色得更有戏、更俏皮、更扣题（删口水话、加强节奏与包袱），但不能改变 ta 想表达的意思或人设。你还负责把各人台词串成完整演出、补旁白、安排上下场、把态度表现化进去；欣然就顺；勉强/隐忍让别扭从神态细节渗出；抵触/拒演让 ta 棒读/敷衍/出戏，但**别写成反目成仇**，底色是"来都来了陪大家玩"）：',
+        feedback || '（演员没什么意见）',
+        '',
+        `**别为了戏剧化而戏剧化**：尊重并放大演员真正投入的情绪——如果有人被这出戏戳中、入戏极深（悲到揪心、燃到起鸡皮、真情流露），就把那份氛围（旁白、停顿、留白、灯光提示）烘托到位；该庄重的别用吐槽冲淡、该哀伤的别强行搞笑。喜怒哀乐，每一种情绪都要给足、给对。`,
+        '',
+        `**绝对禁忌是硬红线**：任何演员标了【绝对禁忌】的，绝不能违反——宁可把相关剧情改得面目全非也要绕开；演员的【写作指导】请尽量采纳。`,
+        `**OOC 红线 · 塔塔开**：如果剧本根本性 OOC、踩了人物真实关系红线（硬把没暧昧的两人凑成恋人、强行 CP、强行扭曲人设），且演员明确抗拒（抵触/拒演/写了禁忌），**别把这种内容硬演成真**——顺着抗拒把这段改得面目全非：当场拒演、罢演风波、集体拆台、跳戏吐槽编剧、把"强行恋爱"演成"强行尴尬/互相嫌弃/笑场翻车"……让"演员造反"本身成为看点。但若某段恰好符合演员的真实关系、没人抗拒，就正常演，别没事找事拆台。`,
+        '',
+        `请整合成最终演出版，然后严格按下面格式输出（标签外不要写别的）：`,
+        `<终本>`,
+        `每行一拍，用竖线分隔，四种拍：`,
+        `旁白|内容 —— 旁白不止写环境/动作，更可以是旁白君的吐槽、临场救场圆场、对演员演技或状况的调侃，让旁白有戏、有态度，别只写"（灯光暗下）"这种干提示`,
+        `上场|演员名`,
+        `下场|演员名`,
+        `台词|演员名|一句台词`,
+        `——台词每拍**不超过 ${bubbleMax} 字**，长的用句号切成多拍（一拍一个气泡）。用"演员名"不是角色名。`,
+        `</终本>`,
+        `<观众>`,
+        `赛博观众名|一句锐评/吐槽（3~4 条，名字与风格各异，有捧有踩）`,
+        `</观众>`,
+        `<评级>等级 + 半句理由</评级>`,
+        '',
+        `【评级标准 · 严格打分，别动不动给 S】综合权衡四项：`,
+        `① 忠于剧本：最终演出有没有兑现原剧本的核心立意；`,
+        `② 选角贴合：演员本色 vs 所演角色设定，贴合加分、违和扣分；`,
+        `③ 演技融合：演员的态度/性格有没有自然化进演出（把勉强/抵触处理得妙也加分，处理垮就扣）；`,
+        `④ 整体观感。`,
+        `档位：S=四项都拔尖的神作（极罕见，慎给）；A=优秀；B=合格、有亮点；C=平庸或有明显短板；D=灾难/跑题/严重违和。请如实评，宁可苛刻。`,
+    ].join('\n');
+}
+
+export interface ParsedDirector {
+    stage: { kind: 'line' | 'narration' | 'enter' | 'exit'; actorName?: string; text: string }[];
+    reviews: { critic: string; text: string }[];
+    rating: string;
+}
+
+export function parseDirectorOutput(raw: string): ParsedDirector {
+    const pick = (tag: string) => { const m = raw.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`)); return m ? m[1].trim() : ''; };
+    const stage: ParsedDirector['stage'] = [];
+    for (const line of pick('终本').split('\n').map(l => l.trim()).filter(Boolean)) {
+        const parts = line.split('|').map(p => p.trim());
+        const head = parts[0];
+        if (head === '旁白') stage.push({ kind: 'narration', text: stripLeakedAttrs(parts.slice(1).join('|')) });
+        else if (head === '上场') stage.push({ kind: 'enter', actorName: parts[1], text: parts[1] || '' });
+        else if (head === '下场') stage.push({ kind: 'exit', actorName: parts[1], text: parts[1] || '' });
+        else if (head === '台词') stage.push({ kind: 'line', actorName: parts[1], text: stripLeakedAttrs(parts.slice(2).join('|')) });
+    }
+    const reviews = pick('观众').split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+        const [critic, ...rest] = l.split(/[|｜:：]/);
+        return { critic: (critic || '观众').replace(/^[-·•\s]+/, '').trim(), text: rest.join('：').trim() };
+    }).filter(r => r.text);
+    const rating = stripLeakedAttrs(pick('评级')) || 'B';
+    return { stage, reviews, rating };
 }

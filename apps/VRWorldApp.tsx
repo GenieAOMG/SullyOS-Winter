@@ -5,6 +5,7 @@ import {
     UploadSimple, PencilSimple, FlipHorizontal, CaretLeft, Sparkle,
     CircleNotch, TextAa, Palette, Pause, MusicNotes, Queue, Question,
 } from '@phosphor-icons/react';
+import TheaterPanel from './theater/TheaterPanel';
 import { CreatorIframe, type ChibiResult } from '../components/Like520Event';
 import { useMusic, type Song } from '../context/MusicContext';
 import { DB } from '../utils/db';
@@ -68,15 +69,7 @@ const stripSelfName = (text: string | undefined, name: string | undefined): stri
 import type { CharacterProfile, UserProfile, VRWorldNovel, VRNovelAnnotation, VRCardMeta, VRRoomId, VRMusicRoomState, CharPlaylistSong, VRGuestbookState, VRGuestbookMessage, VRLetter, ApiPreset, APIConfig } from '../types';
 
 // ============ chibi 形象解析（vrState.chibi → 立绘 → 头像） ============
-interface ChibiDisplay { img: string; scale: number; offsetY: number; flip: boolean; isFallback: boolean; }
-const getChibi = (char: CharacterProfile): ChibiDisplay => {
-    const c = char.vrState?.chibi;
-    if (c?.img) return { img: c.img, scale: c.scale ?? 1, offsetY: c.offsetY ?? 0, flip: !!c.flip, isFallback: false };
-    const sprites = (char.activeSkinSetId && char.dateSkinSets?.find(s => s.id === char.activeSkinSetId)?.sprites)
-        || char.sprites || {};
-    const fb = sprites['happy'] || sprites['normal'] || sprites['smile'] || char.avatar || '';
-    return { img: fb, scale: 1, offsetY: 0, flip: false, isFallback: true };
-};
+import { getChibi } from '../utils/vrWorld/chibi';
 
 type Tab = 'world' | 'library' | 'settings' | 'api';
 
@@ -92,6 +85,7 @@ const ROOM_SLOTS: Record<VRRoomId, { x: number; y: number }[]> = {
     guestbook: [{ x: 28, y: 76 }, { x: 52, y: 78 }, { x: 73, y: 74 }, { x: 40, y: 68 }],
     gym:       [{ x: 26, y: 74 }, { x: 50, y: 80 }, { x: 74, y: 74 }, { x: 38, y: 66 }, { x: 62, y: 66 }],
     postoffice:[{ x: 28, y: 76 }, { x: 52, y: 78 }, { x: 72, y: 72 }, { x: 42, y: 68 }],
+    theater:   [{ x: 30, y: 80 }, { x: 70, y: 80 }, { x: 50, y: 84 }, { x: 40, y: 72 }, { x: 60, y: 72 }],
     cafe:      [{ x: 30, y: 74 }, { x: 54, y: 78 }, { x: 70, y: 72 }],
 };
 
@@ -101,6 +95,7 @@ const IDLE_QUIPS: Record<VRRoomId, string[]> = {
     guestbook: ['写点什么呢', '路过留个名', '看看墙上的话', '嗯…'],
     gym: ['活动一下', '再来一组！', '伸个懒腰', '热身中'],
     postoffice: ['给谁写封信呢', '封口、寄出', '翻翻信格', '写点心里话'],
+    theater: ['对台词…', '再走一遍', '背词中', '候场'],
     cafe: ['', '', '', ''],
 };
 
@@ -157,7 +152,12 @@ const VRWorldApp: React.FC = () => {
     const loadFeed = useCallback(async () => {
         const items: FeedItem[] = [];
         for (const c of characters) {
-            const msgs = await DB.getRecentMessagesByCharId(c.id, 40);
+            // includeProcessed=true：彼方动态必须无视记忆宫殿高水位线（mp_lastMsgId_<charId>）。
+            // 否则角色一聊天，记忆宫殿管线就把高水位推过这些 vr_card 的 id，
+            // getRecentMessagesByCharId 默认会把 id<=hwm 的消息全过滤掉，
+            // 动态流就会在"不知道什么时候"（后台向量化跑完时）突然清零——尽管消息其实还在 IndexedDB 里。
+            // 同时把窗口从 40 放大到 200，避免最近一条动态被大量普通聊天挤出取数窗口。
+            const msgs = await DB.getRecentMessagesByCharId(c.id, 200, true);
             for (const m of msgs) {
                 // 用户在留言簿的发言会广播进每个角色的 vr_card（供 LLM 上下文用），
                 // 但它不是"角色自己的动态"——不进动态流，也不当作 chibi 气泡。
@@ -427,6 +427,7 @@ const RoomBackground: React.FC<{ roomId: VRRoomId; className?: string }> = ({ ro
         guestbook: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/PLAY.jpg',
         postoffice: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/post.png',
         gym: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/ALL.png',
+        theater: 'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/img/SHOW.png',
     };
     const bgUrl = ROOM_BG[roomId];
     if (bgUrl) {
@@ -796,6 +797,7 @@ const HelpModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                     <div><b className="text-indigo-100">留言簿</b>：公共版聊墙，角色发帖、接话茬。你也能在底部<b className="text-sky-200">以自己身份留言</b>，会广播给所有接入的角色。</div>
                     <div><b className="text-indigo-100">娱乐室</b>：纯放飞，角色在这儿瞎玩造谣找乐子。</div>
                     <div><b className="text-indigo-100">邮局</b>：写漂流信交陌生笔友——见下方重点。</div>
+                    <div><b style={{ color: '#f5a6a6' }}>剧院</b>：角色逛进来会<b>写一出舞台剧</b>投稿。你可以翻投稿、自己写/让 LLM 写/传 txt，挑一本<b>【编排】</b>：给角色选演员（缺角能 roll 个 NPC），角色读完会提意见/改戏，<b>【召唤导演】</b>整合成最终本，小人气泡<b>演一遍</b>，再收进历史舞台剧。</div>
                 </Block>
 
                 <Block title="邮局怎么玩（重点）" tone="rgba(243,208,138,.95)">
@@ -882,10 +884,16 @@ const WorldView: React.FC<{
     const curPage = Math.min(page, totalPages - 1);
     const shown = feed.slice(curPage * FEED_PER_PAGE, curPage * FEED_PER_PAGE + FEED_PER_PAGE);
     const [confirmDel, setConfirmDel] = useState<FeedItem | null>(null);
+    // 房间分页：每页 6 间，第 2 页放"开发中"的糯米鸡研发中心等
+    const ROOMS_PER_PAGE = 6;
+    const [roomPage, setRoomPage] = useState(0);
+    const roomTotalPages = Math.max(1, Math.ceil(VR_ROOMS.length / ROOMS_PER_PAGE));
+    const curRoomPage = Math.min(roomPage, roomTotalPages - 1);
+    const shownRooms = VR_ROOMS.slice(curRoomPage * ROOMS_PER_PAGE, curRoomPage * ROOMS_PER_PAGE + ROOMS_PER_PAGE);
     return (
     <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3">
-            {VR_ROOMS.map(room => {
+            {shownRooms.map(room => {
                 const occupants = occupantsByRoom[room.id] || [];
                 return (
                     <button key={room.id} onClick={() => room.implemented && onEnterRoom(room.id)}
@@ -931,6 +939,15 @@ const WorldView: React.FC<{
                 );
             })}
         </div>
+        {roomTotalPages > 1 && (
+            <div className="flex items-center justify-center gap-3 -mt-1">
+                <button onClick={() => setRoomPage(p => Math.max(0, p - 1))} disabled={curRoomPage === 0}
+                    className="h-7 w-7 rounded-full flex items-center justify-center text-white/70 disabled:opacity-25 active:bg-white/10" style={{ border: '1px solid rgba(255,255,255,.14)' }}><CaretLeft size={13} weight="bold" /></button>
+                <span className="text-[10.5px] text-white/45 tracking-wider tabular-nums">{curRoomPage + 1} / {roomTotalPages}</span>
+                <button onClick={() => setRoomPage(p => Math.min(roomTotalPages - 1, p + 1))} disabled={curRoomPage >= roomTotalPages - 1}
+                    className="h-7 w-7 rounded-full flex items-center justify-center text-white/70 disabled:opacity-25 active:bg-white/10" style={{ border: '1px solid rgba(255,255,255,.14)' }}><CaretRight size={13} weight="bold" /></button>
+            </div>
+        )}
 
         {novelCount === 0 && (
             <button onClick={onGoLibrary} className="w-full rounded-2xl py-3.5 text-[12px] text-white/65 tracking-wide active:bg-white/5"
@@ -1474,6 +1491,7 @@ const RoomScene: React.FC<{
     const isMusic = roomId === 'music';
     const isGuestbook = roomId === 'guestbook';
     const isPostOffice = roomId === 'postoffice';
+    const isTheater = roomId === 'theater';
     const [detail, setDetail] = useState<CharacterProfile | null>(null);
     const [musicState, setMusicState] = useState<VRMusicRoomState | null>(null);
     const [board, setBoard] = useState<VRGuestbookState | null>(null);
@@ -1640,6 +1658,9 @@ const RoomScene: React.FC<{
                 {/* 邮局：信件管理面板 */}
                 {isPostOffice && <PostOfficePanel addToast={addToast} characters={characters} userName={userName} />}
 
+                {/* 剧院：话剧部门面板（投稿 / 编排 / 演出 / 历史） */}
+                {isTheater && <TheaterPanel addToast={addToast} />}
+
                 {/* chibi 站位（可隐藏，避免挡住留言墙等文字） */}
                 {!hideChibi && occupants.map((c, i) => {
                     const slot = slots[i % slots.length];
@@ -1652,7 +1673,7 @@ const RoomScene: React.FC<{
                         </div>
                     );
                 })}
-                {occupants.length === 0 && !isMusic && !isGuestbook && !isPostOffice && (
+                {occupants.length === 0 && !isMusic && !isGuestbook && !isPostOffice && !isTheater && (
                     <div className="absolute inset-0 flex items-center justify-center">
                         <p className="text-white/70 text-[12px] bg-black/30 rounded-full px-4 py-2">这个房间还没有人。去「接入」启用角色吧。</p>
                     </div>
@@ -2458,6 +2479,7 @@ const SettingsView: React.FC<{
                 actions={[
                     { label: '随机一个房间', onClick: () => go() },
                     ...(novelCount > 0 ? [{ label: '图书馆 · 读书写批注', onClick: () => go('library') }] : []),
+                    { label: '剧院 · 写剧本投稿', onClick: () => go('theater') },
                     { label: '听歌房 · 点歌锐评', onClick: () => go('music') },
                     { label: '留言簿 · 发帖版聊', onClick: () => go('guestbook') },
                     { label: '娱乐室 · 放开玩', onClick: () => go('gym') },

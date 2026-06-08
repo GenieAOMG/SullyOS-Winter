@@ -703,6 +703,9 @@ if (IS_EMBEDDED) {
     } else if (e.data.type === 'like520_add_items') {
       // 仅合并自定义部件，不重新初始化（不会重置当前选择）
       mergeExtraItems(e.data.payload && e.data.payload.extraItems);
+    } else if (e.data.type === 'like520_roll') {
+      // 「彼方·剧院」headless 随机生成一个 NPC 立绘
+      rollAndExport();
     }
   });
 }
@@ -1977,7 +1980,7 @@ function toast(msg) {
   t._timer = setTimeout(() => t.classList.remove("show"), 1600);
 }
 
-document.getElementById("btnRandom").onclick = () => {
+function randomizeAll() {
   PARTS.forEach(part => {
     /* 随机时排除特殊款（SULLY） */
     const randomPool = part.items.filter(it => !it.special);
@@ -2028,8 +2031,35 @@ document.getElementById("btnRandom").onclick = () => {
   });
   renderPanel();
   renderCharacter();
-  toast("✨ 随机搭配好啦");
-};
+}
+document.getElementById("btnRandom").onclick = () => { randomizeAll(); toast("✨ 随机搭配好啦"); };
+
+/* headless：随机一套 + 直接导出透明立绘并回传父框架，供「彼方·剧院」程序化 roll NPC 用
+   （不弹导出弹窗、不需要用户交互）。 */
+async function rollAndExport() {
+  try {
+    randomizeAll();
+    /* 等两帧让 renderCharacter 把 DOM/图片更新完 */
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    if (typeof html2canvas === "undefined") {
+      await new Promise((res, rej) => {
+        const s = document.createElement("script");
+        s.src = "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+        s.onload = res; s.onerror = rej;
+        document.head.appendChild(s);
+      });
+    }
+    const charEl = document.querySelector(".character");
+    const canvas = await html2canvas(charEl, { backgroundColor: null, scale: 2, useCORS: true });
+    const transparentDataUrl = canvas.toDataURL("image/png");
+    window.parent.postMessage({
+      type: 'like520_result',
+      payload: { mode: LIKE520_MODE, dataUrl: transparentDataUrl, frameDataUrl: null, transparentDataUrl, state: JSON.parse(JSON.stringify(state)) }
+    }, '*');
+  } catch (err) {
+    window.parent.postMessage({ type: 'like520_roll_error', payload: { error: String(err && err.message || err) } }, '*');
+  }
+}
 
 document.getElementById("btnReset").onclick = () => {
   Object.keys(state.selected).forEach(k => {

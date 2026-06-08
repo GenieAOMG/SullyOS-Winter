@@ -20,6 +20,7 @@ import ProactiveSettingsModal from '../components/chat/ProactiveSettingsModal';
 import ThinkingChainSettingsModal from '../components/chat/ThinkingChainSettingsModal';
 import { useChatAI } from '../hooks/useChatAI';
 import { synthesizeSpeechDetailed, cleanTextForTts } from '../utils/minimaxTts';
+import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { isInstantConfigReady, loadInstantConfig } from '../utils/instantPushClient';
 
 const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español' };
@@ -196,6 +197,16 @@ const Chat: React.FC = () => {
     const prevIsTypingRef = useRef(false);
     // Track blob: URLs we created so we can revoke them on character switch / unmount.
     const voiceBlobUrlsRef = useRef<Set<string>>(new Set());
+    // We warn the user at most once (per character) that MiniMax voice isn't configured —
+    // a character can produce many <语音> messages and we don't want to spam toasts.
+    const minimaxWarnedRef = useRef(false);
+
+    /** Whether this character can synthesize real voice (MiniMax key + a voice profile). */
+    const isMinimaxReady = useCallback(() => {
+        const vp = char.voiceProfile;
+        const hasVoiceProfile = !!(vp?.voiceId || (vp?.timberWeights && vp.timberWeights.length > 0));
+        return hasVoiceProfile && !!resolveMiniMaxApiKey(apiConfig);
+    }, [char, apiConfig]);
 
     const persistVoice = async (msgId: number, url: string, blob: Blob | null, originalText: string, spokenText: string | undefined, lang: string | undefined) => {
         try {
@@ -268,6 +279,18 @@ const Chat: React.FC = () => {
 
         // Auto-TTS: only generate voice when AI explicitly used <语音> tag
         if (autoTriggered && !voiceTagContent) return;
+
+        // MiniMax not configured for this character: don't attempt synthesis (it would
+        // throw and surface an error toast on every message / every tap). Instead remind
+        // the user just once — the <语音> bubble still shows its 转文字 button so the
+        // text stays readable, matching real voice messages.
+        if (!isMinimaxReady()) {
+            if (!autoTriggered && !minimaxWarnedRef.current) {
+                minimaxWarnedRef.current = true;
+                addToast('该角色未配置 MiniMax 语音，无法播放真实语音，可点「转文字」查看内容', 'info');
+            }
+            return;
+        }
 
         setVoiceLoading(prev => new Set(prev).add(msg.id));
         try {
@@ -443,6 +466,8 @@ const Chat: React.FC = () => {
 
     // Revoke blob URLs when switching characters / unmounting to avoid leaks.
     useEffect(() => {
+        // Reset the "MiniMax not configured" warning so each character gets one reminder.
+        minimaxWarnedRef.current = false;
         const urls = voiceBlobUrlsRef.current;
         return () => {
             urls.forEach(u => { try { URL.revokeObjectURL(u); } catch { /* ignore */ } });
@@ -1903,6 +1928,23 @@ const Chat: React.FC = () => {
     // Memoize ChatInputArea callbacks
     const handleSendCallback = useCallback(() => handleSendText(), [char, input, replyTarget]);
     const handleCharSelectCallback = useCallback((id: string) => { setActiveCharacterId(id); setShowPanel('none'); }, []);
+    // 兜底：正常情况下 OSContext 启动时一定会保底一个角色，char 不该为空。
+    // 但若 init 期间某个 store 读取失败（数据其实还在 IndexedDB 里），characters 可能暂时为空，
+    // 此时下面 char.chatBackground 会直接抛 "undefined is not an object" 把整个 App 崩到错误页。
+    // 这里给个温和空态，避免硬崩，也好让用户能退回桌面/重启恢复。
+    if (!char) {
+        return (
+            <div className="flex flex-col items-center justify-center h-full bg-[#f1f5f9] text-center px-8 gap-3">
+                <div className="text-4xl">💤</div>
+                <div className="text-slate-600 text-sm font-medium">暂时没有可用的角色</div>
+                <div className="text-slate-400 text-xs leading-relaxed">数据可能未加载完成。请退回桌面后重新进入；若仍为空，重启应用即可恢复。</div>
+                <button onClick={closeApp} className="mt-2 px-4 py-2 rounded-full bg-slate-800 text-white text-xs">返回桌面</button>
+            </div>
+        );
+    }
+
+    // 动森彩蛋模式（受「聊天联动」开关控制：关掉则聊天保持原样式）
+    const acnh = osTheme.skin === 'animalcrossing' && osTheme.acnhChatSync !== false;
     const chatChromeStyle = osTheme.chatChromeStyle || 'soft';
     const chatBackgroundStyle = osTheme.chatBackgroundStyle || 'plain';
     const chatRootClass =
@@ -1941,16 +1983,48 @@ const Chat: React.FC = () => {
               : {
                   backgroundImage: 'none',
                 };
+    // 动森彩蛋：浅奶油米黄中心（上下绿条由 header/输入栏负责），配色参考 Pocket Camp。
+    const acnhRootClass = 'flex flex-col h-full overflow-hidden relative font-sans transition-[background-color] duration-500';
+    const acnhRootStyle: React.CSSProperties = {
+        backgroundColor: '#F6F0D8',
+        backgroundImage: 'none',
+    };
+    const finalRootClass = acnh ? acnhRootClass : chatRootClass;
+    // 动森下强制覆盖角色自定义聊天背景，保证整机一致的彩蛋观感
+    const finalRootStyle = acnh ? acnhRootStyle : chatRootStyle;
     const chatAvatarSizeClass = osTheme.chatAvatarSize === 'small' ? 'w-7 h-7' : osTheme.chatAvatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
     const chatAvatarRadiusClass = osTheme.chatAvatarShape === 'square' ? 'rounded-sm' : osTheme.chatAvatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
     const chatPendingAvatarClass = `${chatAvatarSizeClass} ${chatAvatarRadiusClass} object-cover`;
 
     return (
-        <div 
-            className={chatRootClass}
-            style={chatRootStyle}
+        <div
+            className={finalRootClass}
+            style={finalRootStyle}
         >
              {activeTheme.customCss && <style>{activeTheme.customCss}</style>}
+
+             {/* 动森彩蛋：作用域 CSS 覆盖气泡——奶油 AI 气泡 + 蜜桃用户气泡，暖棕文字，绕开 MessageItem 复杂逻辑 */}
+             {acnh && <style>{`
+                .sully-bubble-ai {
+                    background: #FBF4DE !important;
+                    color: #6b5a3e !important;
+                    border: 1.5px solid #efe6c8 !important;
+                    border-radius: 24px !important;
+                    box-shadow: 0 4px 10px -5px rgba(120,95,45,0.28) !important;
+                }
+                .sully-bubble-user {
+                    background: #F5C896 !important;
+                    color: #6b4a2f !important;
+                    border: 1.5px solid #eeb87f !important;
+                    border-radius: 24px !important;
+                    box-shadow: 0 4px 10px -5px rgba(150,100,55,0.32) !important;
+                }
+                /* 仅动森：聊天正文放大一点 */
+                .sully-bubble-ai .text-\\[15px\\], .sully-bubble-user .text-\\[15px\\] {
+                    font-size: 16.5px !important;
+                    line-height: 1.7 !important;
+                }
+             `}</style>}
 
              {/* 记忆整理中 — 顶部浮动胶囊（不阻塞交互，轻量无 backdrop-filter） */}
              {memoryPalaceStatus && (
@@ -2202,6 +2276,7 @@ const Chat: React.FC = () => {
                 headerDensity={osTheme.chatHeaderDensity}
                 statusStyle={osTheme.chatStatusStyle}
                 chromeStyle={osTheme.chatChromeStyle}
+                acnh={acnh}
              />
 
             {/* 认知消化结果弹窗 — 全屏玻璃拟态 */}
@@ -2523,6 +2598,7 @@ const Chat: React.FC = () => {
                     inputStyle={osTheme.chatInputStyle}
                     sendButtonStyle={osTheme.chatSendButtonStyle}
                     chromeStyle={osTheme.chatChromeStyle}
+                    acnh={acnh}
                 />
             </div>
 

@@ -969,14 +969,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         await loadSettings();
 
+        // 用 allSettled 而非 all：早期 Promise.all 只要任意一个 store 读取 reject，
+        // 整批加载就全挂 → setCharacters / setWorldbooks 都不执行 → 角色和世界书"凭空消失"
+        // （数据其实还在 IndexedDB 里，只是没读进 state）→ Chat 渲染时 char 为 undefined 直接崩。
+        // 改成各 store 独立失败，一个坏掉不连累其余，最大限度保住用户数据。
+        const settle = async <T,>(p: Promise<T>, label: string, fallback: T): Promise<T> => {
+            try {
+                return await p;
+            } catch (e) {
+                console.error(`Data init: 读取 ${label} 失败，已降级`, e);
+                return fallback;
+            }
+        };
+
         const [dbChars, dbThemes, dbUser, dbGroups, dbWorldbooks, dbNovels, dbSongs] = await Promise.all([
-            DB.getAllCharacters(),
-            DB.getThemes(),
-            DB.getUserProfile(),
-            DB.getGroups(),
-            DB.getAllWorldbooks(),
-            DB.getAllNovels(),
-            DB.getAllSongs()
+            settle(DB.getAllCharacters(), 'characters', [] as CharacterProfile[]),
+            settle(DB.getThemes(), 'themes', [] as ChatTheme[]),
+            settle(DB.getUserProfile(), 'userProfile', null as UserProfile | null),
+            settle(DB.getGroups(), 'groups', [] as GroupProfile[]),
+            settle(DB.getAllWorldbooks(), 'worldbooks', [] as Worldbook[]),
+            settle(DB.getAllNovels(), 'novels', [] as NovelBook[]),
+            settle(DB.getAllSongs(), 'songs', [] as SongSheet[])
         ]);
 
         let finalChars = dbChars;
@@ -1103,6 +1116,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       root.style.setProperty('--primary-hue', String(h));
       root.style.setProperty('--primary-sat', `${s}%`);
       root.style.setProperty('--primary-lightness', `${l}%`);
+
+      // 桌面皮肤：写到 <html data-skin>，供全局 CSS（index.html）与组件读取。
+      root.dataset.skin = theme.skin || 'default';
   }, [theme]);
 
   // --- Update: Handle Scheduled Messages with Unread Flags & Web Notifications ---
