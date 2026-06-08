@@ -363,7 +363,7 @@ const DateApp: React.FC = () => {
 
         // Explicitly tell AI about the scene
         systemPrompt += `### [Visual Novel Mode: 视觉小说脚本模式]
-你正在与用户进行**面对面**的互动。这不是聊天，是一场真实的见面。
+你正在与用户进行**面对面**的互动。这不是聊天，是一场真实的见面。你作为模型拥有一个存在于会面空间中的肉体。
 
 ### 核心规则：一行一念 (One Line per Beat)
 前端解析器基于**换行符**来分割气泡。
