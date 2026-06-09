@@ -20,6 +20,7 @@ import type { DigestResult } from '../utils/memoryPalace';
 // 不再 import callMcdTool / normalizeMcdToolName / isMcdConfigured / 旧 prompt。
 import { MCD_PROPOSE_TOOL, autoFixProposalCodesByName } from '../utils/mcdToolBridge';
 import { buildChatRequestPayload } from '../utils/chatRequestPayload';
+import { extractClaudePromptCacheStats, formatClaudePromptCacheStats, fromClaudeNativeResponse, shouldUseClaudeNativeMode, shouldUseClaudePromptCache, summarizeClaudeNativePayload, toClaudeNativeRequest, withClaudePromptCache } from '../utils/claudePromptCache';
 import {
     isInstantConfigReady,
     sendInstantPushAndAwaitReply,
@@ -735,7 +736,18 @@ export const useChatAI = ({
             // safeResponseJson 已能透明拼接 SSE 响应，所以打开 stream 后无需改下游。
             const apiT0 = performance.now();
             const userTemp = (effectiveApi as any).temperature ?? apiConfig.temperature ?? 0.85;
-            const userStream = (effectiveApi as any).stream ?? apiConfig.stream ?? false;
+            const requestedStream = (effectiveApi as any).stream ?? apiConfig.stream ?? false;
+            const claudePromptCacheEnabled = (effectiveApi as any).claudePromptCacheEnabled ?? apiConfig.claudePromptCacheEnabled;
+            const claudeNativeModeRequested = (effectiveApi as any).claudeNativeModeEnabled ?? apiConfig.claudeNativeModeEnabled;
+            const claudeNativeModeActive = shouldUseClaudeNativeMode({
+                cacheEnabled: claudePromptCacheEnabled,
+                nativeEnabled: claudeNativeModeRequested,
+                model: effectiveApi.model,
+            });
+            if (claudeNativeModeRequested && !claudeNativeModeActive) {
+                throw new Error('Claude Native Mode 已开启，但当前请求不满足条件：需要同时开启 Claude Prompt Cache，并使用 Claude 模型。请求已停止，没有回退到普通 /chat/completions。');
+            }
+            const userStream = claudeNativeModeActive ? false : requestedStream;
             const baseReqBody: any = {
                 model: effectiveApi.model,
                 messages: fullMessages,
@@ -743,6 +755,18 @@ export const useChatAI = ({
                 max_tokens: 8000,
                 stream: userStream,
             };
+            const claudePromptCacheActive = shouldUseClaudePromptCache({
+                enabled: claudePromptCacheEnabled,
+                model: baseReqBody.model,
+            });
+            if (claudePromptCacheActive) {
+                baseReqBody.messages = withClaudePromptCache(baseReqBody.messages);
+                const firstSystem = baseReqBody.messages.find((m: any) => m?.role === 'system');
+                const firstBlock = Array.isArray(firstSystem?.content) ? firstSystem.content[0] : null;
+                if (firstBlock?.cache_control?.type !== 'ephemeral') {
+                    throw new Error('Claude Prompt Cache 已开启，但未能给 system prompt 打上 cache_control。请求已停止，没有回退到普通格式。');
+                }
+            }
             // 思考过程展示开启时显式向后端请求 extended thinking。
             // 不同代理认不同入口，全都试一遍，代理不识别的会自动忽略：
             //  - 模型名 -thinking 后缀：packycode / anyrouter 等第三方 Claude 中转的主流约定
@@ -750,7 +774,7 @@ export const useChatAI = ({
             //  - reasoning_effort：OpenAI 系（o1/o3、GLM-4.5、deepseek-reasoner 等）
             //  - extra_body.thinking：LiteLLM 系桥
             // 关掉则一个都不传，避免无谓的 thinking token 计费。
-            if (payload.flags.thinkingActive) {
+            if (payload.flags.thinkingActive && !claudeNativeModeActive) {
                 const m: string = baseReqBody.model || '';
                 if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
                     baseReqBody.model = `${m}-thinking`;
@@ -765,7 +789,7 @@ export const useChatAI = ({
             }
             // 小程序模式: 给 LLM 一个 UI 钩子工具 propose_cart_items, 推荐时可调用,
             // 工具不真改购物车也不调 MCP, 只是把推荐渲染成 + 加按钮卡片让用户决定
-            if (payload.flags.mcdActive) {
+            if (payload.flags.mcdActive && !claudeNativeModeActive) {
                 baseReqBody.tools = [MCD_PROPOSE_TOOL];
                 baseReqBody.tool_choice = 'auto';
             }
@@ -818,12 +842,42 @@ export const useChatAI = ({
                 return;
             }
 
-            let data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+            let data: any;
+            if (claudeNativeModeActive) {
+                const nativeReq = toClaudeNativeRequest(baseReqBody, baseUrl);
+                const nativeSummary = summarizeClaudeNativePayload({
+                    openAiBody: baseReqBody,
+                    nativeBody: nativeReq.body,
+                });
+                if (!nativeSummary.actualSystemEqual || !nativeSummary.actualMessageEqual) {
+                    throw new Error(
+                        `Claude Native Mode 自检失败：system/messages 转换后不一致，已停止请求。` +
+                        ` system ${nativeSummary.openAiSystemChars} -> ${nativeSummary.nativeSystemChars},` +
+                        ` messages ${nativeSummary.openAiMessageCount}/${nativeSummary.openAiMessageChars}` +
+                        ` -> ${nativeSummary.nativeMessageCount}/${nativeSummary.nativeMessageChars}`
+                    );
+                }
+                const nativeHeaders = { ...headers, 'anthropic-version': '2023-06-01' };
+                const nativeData = await safeFetchJson(nativeReq.url, {
+                    method: 'POST',
+                    headers: nativeHeaders,
+                    body: JSON.stringify(nativeReq.body),
+                }, 0, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天回复' });
+                data = fromClaudeNativeResponse(nativeData);
+            } else {
+                data = await safeFetchJson(`${baseUrl}/chat/completions`, {
                 method: 'POST', headers,
                 body: JSON.stringify(baseReqBody)
-            }, 2, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天回复' });
+            }, claudePromptCacheActive ? 0 : 2, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天回复' });
             console.log(`⏱ [API call] ${Math.round(performance.now() - apiT0)}ms`);
+            if (claudePromptCacheActive) {
+                console.info(`[ClaudeCache] ${formatClaudePromptCacheStats(extractClaudePromptCacheStats(data))}`);
+            }
+            }
             updateTokenUsage(data, historyMsgCount, 'initial');
+            if (claudeNativeModeActive && claudePromptCacheActive) {
+                console.info(`[ClaudeCache] ${formatClaudePromptCacheStats(extractClaudePromptCacheStats(data))}`);
+            }
 
             // 3.4 麦当劳小程序 propose_cart_items UI 钩子工具循环
             //     不调 MCP, 只把模型的 args 作为 mcd_card kind=proposal 落库, 让小程序聊天面板渲染

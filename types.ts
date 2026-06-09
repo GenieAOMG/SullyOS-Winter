@@ -159,6 +159,10 @@ export interface APIConfig {
   stream?: boolean;
   // Per-API temperature for chat / 约会 main calls. Missing → 0.85.
   temperature?: number;
+  // Claude prompt caching for supported OpenAI-compatible Claude routes.
+  // Missing → false. Only main chat requests opt in.
+  claudePromptCacheEnabled?: boolean;
+  claudeNativeModeEnabled?: boolean;
 }
 
 export interface InstantPushConfig {

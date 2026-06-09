@@ -50,6 +50,12 @@ export interface ApiCallLogEntry extends ApiCallMeta {
     completionTokens?: number;
     /** 总 token（total_tokens） */
     totalTokens?: number;
+    /** Claude prompt cache write/create tokens, when provider returns them. */
+    cacheCreationInputTokens?: number;
+    /** Claude prompt cache read/hit tokens, when provider returns them. */
+    cacheReadInputTokens?: number;
+    /** Some OpenAI-compatible providers expose cached prompt tokens here. */
+    cachedInputTokens?: number;
 }
 
 const PRESETS_STORAGE_KEY = 'os_api_presets';
@@ -77,7 +83,7 @@ function stripTrailingSlash(s: string): string {
 
 /** 把 `https://host/v1/chat/completions` 还原成 `https://host/v1`（预设里存的 baseUrl 形态）。 */
 function deriveBaseUrl(url: string): string {
-    return stripTrailingSlash(url.replace(/\/chat\/completions\/?$/i, ''));
+    return stripTrailingSlash(url.replace(/\/chat\/completions\/?$/i, '').replace(/\/messages\/?$/i, ''));
 }
 
 function hostOf(url: string): string {
@@ -130,14 +136,41 @@ function resolvePresetName(baseUrl: string, model: string): string {
  * 在 safeFetchJson 里对 `/chat/completions` 的成功与失败都会调用。
  */
 /** 从 OpenAI 兼容响应里抠 usage（各家代理大多遵循这个字段）。 */
-function extractUsage(response: unknown): { prompt?: number; completion?: number; total?: number } {
+function extractUsage(response: unknown): {
+    prompt?: number;
+    completion?: number;
+    total?: number;
+    cacheCreation?: number;
+    cacheRead?: number;
+    cachedInput?: number;
+} {
     const usage = (response as any)?.usage;
     if (!usage || typeof usage !== 'object') return {};
     const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    const promptDetails = usage.prompt_tokens_details || usage.input_tokens_details || {};
     return {
-        prompt: num(usage.prompt_tokens),
-        completion: num(usage.completion_tokens),
-        total: num(usage.total_tokens),
+        prompt: num(usage.prompt_tokens) ?? num(usage.input_tokens),
+        completion: num(usage.completion_tokens) ?? num(usage.output_tokens),
+        total:
+            num(usage.total_tokens) ??
+            (() => {
+                const input = num(usage.prompt_tokens) ?? num(usage.input_tokens);
+                const output = num(usage.completion_tokens) ?? num(usage.output_tokens);
+                return input != null && output != null ? input + output : undefined;
+            })(),
+        cacheCreation:
+            num(usage.cache_creation_input_tokens) ??
+            num(usage.cache_creation_tokens) ??
+            num(usage.cache_write_input_tokens) ??
+            num(usage.cache_write_tokens) ??
+            num(promptDetails.cache_creation_input_tokens),
+        cacheRead:
+            num(usage.cache_read_input_tokens) ??
+            num(usage.cache_read_tokens) ??
+            num(promptDetails.cache_read_input_tokens),
+        cachedInput:
+            num(promptDetails.cached_tokens) ??
+            num(usage.cached_input_tokens),
     };
 }
 
@@ -166,6 +199,9 @@ export function recordApiCall(input: {
             promptTokens: usage.prompt,
             completionTokens: usage.completion,
             totalTokens: usage.total,
+            cacheCreationInputTokens: usage.cacheCreation,
+            cacheReadInputTokens: usage.cacheRead,
+            cachedInputTokens: usage.cachedInput,
             appId: meta.appId,
             appName: meta.appName,
             charId: meta.charId,

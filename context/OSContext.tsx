@@ -353,6 +353,8 @@ const defaultApiConfig: APIConfig = {
   model: 'gpt-4o-mini',
   stream: false,
   temperature: 0.85,
+  claudePromptCacheEnabled: false,
+  claudeNativeModeEnabled: false,
 };
 
 const generateAvatar = (seed: string) => {
@@ -734,7 +736,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 「API 调用记录」统一记录入口：所有 /chat/completions（裸 fetch + safeFetchJson
               // 内部 fetch 都会经过这里）都记一笔。meta 优先取调用方挂在 init 上的 __sullyMeta
               // （safeFetchJson 传的精确信息），裸 fetch 没有就由 recordApiCall 用环境兜底。
-              if (urlStr.includes('/chat/completions')) {
+              if (urlStr.includes('/chat/completions') || /\/messages\/?$/i.test(urlStr)) {
                   const meta = (config as any)?.__sullyMeta;
                   const body = (config as any)?.body;
                   const status = response.status;
@@ -755,7 +757,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
               if (!response.ok) {
                   // Only log if it's likely an API call (contains chat/completions or models)
-                  if (urlStr.includes('/chat/completions') || urlStr.includes('/models')) {
+                  if (urlStr.includes('/chat/completions') || /\/messages\/?$/i.test(urlStr) || urlStr.includes('/models')) {
                       try {
                           const clone = response.clone();
                           const text = await clone.text();
@@ -782,7 +784,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return response;
           } catch (err: any) {
               // Network Failure
-              if (urlStr.includes('/chat/completions')) {
+              if (urlStr.includes('/chat/completions') || /\/messages\/?$/i.test(urlStr)) {
                   recordApiCall({ url: urlStr, body: (config as any)?.body, ok: false, meta: (config as any)?.__sullyMeta });
               }
               setSystemLogs(prev => [{

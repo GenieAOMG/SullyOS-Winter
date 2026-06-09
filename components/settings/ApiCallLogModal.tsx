@@ -84,6 +84,7 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                 const totalTok = entries.reduce((s, e) => s + (e.totalTokens ?? 0), 0);
                 const promptTok = entries.reduce((s, e) => s + (e.promptTokens ?? 0), 0);
                 const compTok = entries.reduce((s, e) => s + (e.completionTokens ?? 0), 0);
+                const cacheReadTok = entries.reduce((s, e) => s + (e.cacheReadInputTokens ?? e.cachedInputTokens ?? 0), 0);
                 const fmt = (n: number) => n.toLocaleString('en-US');
                 return (
                     <div className="mb-3 rounded-2xl bg-primary/5 border border-primary/15 px-4 py-3 flex items-center justify-around text-center">
@@ -100,6 +101,11 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                         <div>
                             <div className="text-[10px] text-slate-400">输入 / 输出</div>
                             <div className="text-[11px] font-semibold text-slate-500">{fmt(promptTok)} / {fmt(compTok)}</div>
+                        </div>
+                        <div className="w-px h-7 bg-slate-200" />
+                        <div>
+                            <div className="text-[10px] text-slate-400">缓存命中</div>
+                            <div className="text-[11px] font-semibold text-emerald-600">{fmt(cacheReadTok)}</div>
                         </div>
                     </div>
                 );
@@ -151,6 +157,17 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                                 {(e.totalTokens ?? 0).toLocaleString('en-US')}
                                                 <span className="text-slate-400">
                                                     {' '}（入 {(e.promptTokens ?? 0).toLocaleString('en-US')} · 出 {(e.completionTokens ?? 0).toLocaleString('en-US')}）
+                                                </span>
+                                            </span>
+                                        </div>
+                                    )}
+                                    {(e.cacheCreationInputTokens != null || e.cacheReadInputTokens != null || e.cachedInputTokens != null) && (
+                                        <div className="col-span-2 flex items-baseline gap-1.5 min-w-0">
+                                            <span className="text-[10px] text-slate-400 shrink-0">Claude Cache</span>
+                                            <span className="text-emerald-700 truncate">
+                                                读 {(e.cacheReadInputTokens ?? e.cachedInputTokens ?? 0).toLocaleString('en-US')}
+                                                <span className="text-slate-400">
+                                                    {' '}· 写 {(e.cacheCreationInputTokens ?? 0).toLocaleString('en-US')}
                                                 </span>
                                             </span>
                                         </div>

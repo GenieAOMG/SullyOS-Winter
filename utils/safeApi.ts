@@ -16,7 +16,7 @@ import { type ApiCallMeta } from './apiCallLog';
 const log = makeDebugLogger('api', 'SafeAPI');
 
 function isChatCompletionUrl(url: string): boolean {
-    return url.includes('/chat/completions');
+    return url.includes('/chat/completions') || /\/messages\/?$/i.test(url);
 }
 
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */

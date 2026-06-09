@@ -71,6 +71,8 @@ const Settings: React.FC = () => {
   const [localTemperature, setLocalTemperature] = useState<number>(
     typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85
   );
+  const [localClaudePromptCache, setLocalClaudePromptCache] = useState<boolean>(apiConfig.claudePromptCacheEnabled === true);
+  const [localClaudeNativeMode, setLocalClaudeNativeMode] = useState<boolean>(apiConfig.claudeNativeModeEnabled === true);
   const [localMiniMaxKey, setLocalMiniMaxKey] = useState(apiConfig.minimaxApiKey || '');
   const [localMiniMaxGroupId, setLocalMiniMaxGroupId] = useState(apiConfig.minimaxGroupId || '');
   const [localMiniMaxRegion, setLocalMiniMaxRegion] = useState<'domestic' | 'overseas'>(
@@ -333,6 +335,8 @@ const Settings: React.FC = () => {
       setLocalModel(apiConfig.model);
       setLocalStream(apiConfig.stream === true);
       setLocalTemperature(typeof apiConfig.temperature === 'number' ? apiConfig.temperature : 0.85);
+      setLocalClaudePromptCache(apiConfig.claudePromptCacheEnabled === true);
+      setLocalClaudeNativeMode(apiConfig.claudeNativeModeEnabled === true);
       setLocalMiniMaxKey(apiConfig.minimaxApiKey || '');
       setLocalMiniMaxGroupId(apiConfig.minimaxGroupId || '');
       setLocalMiniMaxRegion(apiConfig.minimaxRegion === 'overseas' ? 'overseas' : 'domestic');
@@ -345,6 +349,8 @@ const Settings: React.FC = () => {
       setLocalModel(preset.config.model);
       setLocalStream(preset.config.stream === true);
       setLocalTemperature(typeof preset.config.temperature === 'number' ? preset.config.temperature : 0.85);
+      setLocalClaudePromptCache(preset.config.claudePromptCacheEnabled === true);
+      setLocalClaudeNativeMode(preset.config.claudeNativeModeEnabled === true);
       // MiniMax / AceStep settings are NOT overwritten by presets — typically one user
       // has only one MiniMax / Replicate account regardless of which LLM preset they use.
       addToast(`已加载配置: ${preset.name}`, 'info');
@@ -361,6 +367,8 @@ const Settings: React.FC = () => {
         model: localModel,
         stream: localStream,
         temperature: localTemperature,
+        claudePromptCacheEnabled: localClaudePromptCache,
+        claudeNativeModeEnabled: localClaudeNativeMode,
       });
       setNewPresetName('');
       setShowPresetModal(false);
@@ -374,6 +382,8 @@ const Settings: React.FC = () => {
       model: localModel,
       stream: localStream,
       temperature: localTemperature,
+      claudePromptCacheEnabled: localClaudePromptCache,
+      claudeNativeModeEnabled: localClaudeNativeMode,
     });
     setStatusMsg('配置已保存');
     setTimeout(() => setStatusMsg(''), 2000);
@@ -1031,8 +1041,36 @@ const Settings: React.FC = () => {
                     {showApiAdvanced && (
                         <div className="mt-2 pl-2 border-l-2 border-slate-100 space-y-3 py-2">
                             <p className="text-[10px] text-slate-300 leading-relaxed">
-                                这两项绝大多数用户保持默认即可。除非接口报错"only stream supported"或对回复风格有强需求，否则不建议改。
+                                这些选项绝大多数用户保持默认即可。Claude 缓存只适合明确支持 cache_control 的 Claude 接口。
                             </p>
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <span className="text-[10px] text-slate-400">Claude Prompt Cache</span>
+                                    <p className="text-[9px] text-slate-300 mt-0.5">仅主聊天回复；上游不支持会直接报错</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setLocalClaudePromptCache(v => !v)}
+                                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${localClaudePromptCache ? 'bg-slate-400' : 'bg-slate-200'}`}
+                                    title="给 system prompt 最前面的稳定角色底座添加 Anthropic cache_control"
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${localClaudePromptCache ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                                </button>
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <span className="text-[10px] text-slate-400">Claude Native Mode</span>
+                                    <p className="text-[9px] text-slate-300 mt-0.5">仅 Claude 主聊天；走 Anthropic /messages</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setLocalClaudeNativeMode(v => !v)}
+                                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${localClaudeNativeMode ? 'bg-slate-400' : 'bg-slate-200'}`}
+                                    title="开启后 Claude 主聊天使用 Anthropic 原生 /v1/messages 格式"
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${localClaudeNativeMode ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                                </button>
+                            </div>
                             <div className="flex items-center justify-between">
                                 <div>
                                     <span className="text-[10px] text-slate-400">流式输出 (Stream)</span>
