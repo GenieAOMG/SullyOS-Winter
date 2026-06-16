@@ -14,7 +14,7 @@
  */
 
 import { MemoryNodeDB, AnticipationDB, EventBoxDB, MemoryVectorDB } from './db';
-import type { MemoryNode, Anticipation, EventBox } from './types';
+import type { MemoryNode, Anticipation, EventBox, MemoryVector } from './types';
 import { getRoomLabel } from './types';
 
 /** 导出时随向量一起带上的元信息（便于接入方判断能否复用） */
@@ -126,5 +126,140 @@ export async function exportMemoryPalace(
         includeVectors,
         note: includeVectors ? NOTE_WITH_VECTORS : NOTE_NO_VECTORS,
         characters,
+    };
+}
+
+// ─── 导入 ─────────────────────────────────────────────
+//
+// 把一份导出 JSON 灌回某个目标角色的记忆宫殿（合并，不清空已有数据）。
+// 所有节点/事件盒/期盼都会重新生成 ID 并改挂到目标角色，内部引用
+// （事件盒↔节点、summary、predecessor、sourceId）按 ID 映射表同步重写，
+// 因此同一份文件导入两次会得到两份独立副本，不会互相覆盖。
+
+/** 导入结果统计 */
+export interface ImportResult {
+    nodes: number;
+    eventBoxes: number;
+    anticipations: number;
+    vectors: number;
+    /** 文件里带了向量但本次因模型不符等原因未启用语义检索时的提示（保留字段，当前恒空） */
+    warning?: string;
+}
+
+function genNodeId(): string {
+    return `mn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+function genBoxId(): string {
+    return `eb_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+function genAntId(): string {
+    return `ant_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** 运行时校验：是不是一份记忆宫殿导出文件 */
+export function isMemoryPalaceExportFile(data: any): data is MemoryPalaceExportFile {
+    return !!data
+        && data.type === 'sully_memory_palace_export'
+        && Array.isArray(data.characters);
+}
+
+/**
+ * 把导出文件导入到目标角色（合并）。文件里可能含多个角色，全部并入同一个
+ * 目标角色。已有数据不动，新数据以全新 ID 追加。
+ */
+export async function importMemoryPalace(
+    file: MemoryPalaceExportFile,
+    targetCharId: string,
+): Promise<ImportResult> {
+    if (!isMemoryPalaceExportFile(file)) {
+        throw new Error('文件格式不对：不是 SullyOS 记忆宫殿导出文件');
+    }
+
+    // 跨全部角色收集老 ID → 新 ID 映射（节点 / 事件盒）
+    const nodeIdMap = new Map<string, string>();
+    const boxIdMap = new Map<string, string>();
+    // 老 memoryId → 导出的向量，用于判断节点是否带向量
+    const vectorByOldId = new Map<string, ExportedVector>();
+
+    for (const c of file.characters) {
+        for (const n of c.nodes || []) {
+            if (!nodeIdMap.has(n.id)) nodeIdMap.set(n.id, genNodeId());
+        }
+        for (const b of c.eventBoxes || []) {
+            if (!boxIdMap.has(b.id)) boxIdMap.set(b.id, genBoxId());
+        }
+        for (const v of c.vectors || []) {
+            vectorByOldId.set(v.memoryId, v);
+        }
+    }
+
+    const nodesToSave: MemoryNode[] = [];
+    const vectorsToSave: MemoryVector[] = [];
+    const boxesToSave: EventBox[] = [];
+    const antsToSave: Anticipation[] = [];
+
+    const remapId = (map: Map<string, string>, old?: string | null): string | undefined =>
+        (old && map.has(old)) ? map.get(old)! : undefined;
+
+    for (const c of file.characters) {
+        // 节点
+        for (const n of c.nodes || []) {
+            const newId = nodeIdMap.get(n.id)!;
+            const hasVector = vectorByOldId.has(n.id);
+            // 去掉导出时附加的 roomLabel 字段，只保留 MemoryNode 自身的字段
+            const { roomLabel, ...rest } = n as MemoryNode & { roomLabel?: string };
+            nodesToSave.push({
+                ...rest,
+                id: newId,
+                charId: targetCharId,
+                eventBoxId: remapId(boxIdMap, n.eventBoxId),
+                sourceId: remapId(nodeIdMap, n.sourceId),
+                // 带向量才算已嵌入；不带向量的节点标记未嵌入，等后续重建向量
+                embedded: hasVector,
+            });
+
+            if (hasVector) {
+                const v = vectorByOldId.get(n.id)!;
+                vectorsToSave.push({
+                    memoryId: newId,
+                    charId: targetCharId,
+                    vector: Float32Array.from(v.vector),
+                    dimensions: v.dimensions,
+                    model: v.model,
+                });
+            }
+        }
+
+        // 事件盒
+        for (const b of c.eventBoxes || []) {
+            const newBoxId = boxIdMap.get(b.id)!;
+            boxesToSave.push({
+                ...b,
+                id: newBoxId,
+                charId: targetCharId,
+                summaryNodeId: remapId(nodeIdMap, b.summaryNodeId) ?? null,
+                liveMemoryIds: (b.liveMemoryIds || []).map(id => nodeIdMap.get(id)).filter(Boolean) as string[],
+                archivedMemoryIds: (b.archivedMemoryIds || []).map(id => nodeIdMap.get(id)).filter(Boolean) as string[],
+                predecessorBoxId: remapId(boxIdMap, b.predecessorBoxId),
+            });
+        }
+
+        // 期盼
+        for (const a of c.anticipations || []) {
+            antsToSave.push({ ...a, id: genAntId(), charId: targetCharId });
+        }
+    }
+
+    // 批量写入（MemoryNodeDB.saveMany 会顺带建 BM25 倒排索引）
+    if (nodesToSave.length) await MemoryNodeDB.saveMany(nodesToSave);
+    if (vectorsToSave.length) await MemoryVectorDB.saveMany(vectorsToSave);
+    if (boxesToSave.length) await EventBoxDB.saveMany(boxesToSave);
+    for (const a of antsToSave) await AnticipationDB.save(a);
+
+    return {
+        nodes: nodesToSave.length,
+        eventBoxes: boxesToSave.length,
+        anticipations: antsToSave.length,
+        vectors: vectorsToSave.length,
     };
 }

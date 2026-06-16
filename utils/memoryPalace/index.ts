@@ -71,6 +71,6 @@ export {
 export { wipeAllMemoryPalace } from './wipe';
 export type { WipeResult } from './wipe';
 
-// 导出（接入外置记忆库用）
-export { exportMemoryPalace } from './export';
-export type { MemoryPalaceExportFile, CharacterMemoryPalaceExport, ExportedVector } from './export';
+// 导出 / 导入（接入外置记忆库、跨设备迁移用）
+export { exportMemoryPalace, importMemoryPalace, isMemoryPalaceExportFile } from './export';
+export type { MemoryPalaceExportFile, CharacterMemoryPalaceExport, ExportedVector, ImportResult } from './export';

@@ -8,7 +8,7 @@ import {
     manuallyBindMemories, removeMemoryFromBox, unbindAllLiveMemories,
     reviveArchivedMemory,
     wipeAllMemoryPalace,
-    exportMemoryPalace,
+    exportMemoryPalace, importMemoryPalace, isMemoryPalaceExportFile,
 } from '../utils/memoryPalace';
 import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox } from '../utils/memoryPalace';
 import type { Message } from '../types';
@@ -471,6 +471,11 @@ export default function MemoryPalaceApp() {
     const [exportResult, setExportResult] = useState<string | null>(null);
     // 默认带上向量：多数用户长期用同一套 embedding 模型，向量可直接复用、免重新向量化
     const [exportWithVectors, setExportWithVectors] = useState(true);
+
+    // 导入记忆
+    const [importing, setImporting] = useState(false);
+    const [importResult, setImportResult] = useState<string | null>(null);
+    const importInputRef = React.useRef<HTMLInputElement>(null);
 
     // 关联记忆状态（记忆详情页展示 EventBox 兄弟 + 兼容展示遗留 causal link）
     const [linkedMemories, setLinkedMemories] = useState<LinkedMemoryUI[]>([]);
@@ -1479,6 +1484,44 @@ export default function MemoryPalaceApp() {
             setExportResult(`[err]导出失败：${e?.message || e}`);
         } finally {
             setExporting(false);
+        }
+    };
+
+    /** 选了导入文件后：解析 JSON → 校验 → 合并进当前角色的记忆宫殿。 */
+    const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const fileObj = e.target.files?.[0];
+        // 清空 input，方便重复选同一个文件也能再次触发 onChange
+        if (importInputRef.current) importInputRef.current.value = '';
+        if (!fileObj || !char) return;
+        setImporting(true);
+        setImportResult(null);
+        try {
+            const text = await fileObj.text();
+            const data = JSON.parse(text);
+            if (!isMemoryPalaceExportFile(data)) {
+                setImportResult('[err]这不是 SullyOS 记忆宫殿导出文件');
+                return;
+            }
+            const totalNodes = data.characters.reduce((s, c) => s + (c.nodes?.length || 0), 0);
+            const hadVectors = data.includeVectors;
+            if (!confirm(
+                `即将把文件里的 ${totalNodes} 条记忆合并进【${char.name}】的记忆宫殿。\n\n`
+                + `· 不会覆盖现有记忆，是追加合并（重复导入会得到多份副本）。\n`
+                + (hadVectors ? '· 文件含向量，将一并导入。\n' : '· 文件不含向量，导入后这些记忆需重建向量才能被语义检索。\n')
+                + `\n确定继续？`
+            )) return;
+
+            const result = await importMemoryPalace(data, char.id);
+            const vecPart = result.vectors > 0 ? `、${result.vectors} 条向量` : '';
+            setImportResult(
+                `[ok]已导入 ${result.nodes} 条记忆、${result.eventBoxes} 个事件盒、${result.anticipations} 个期盼${vecPart}`
+                + (hadVectors ? '' : '（无向量，建议到「全局设置」重建向量后再用语义检索）')
+            );
+            await loadStats();
+        } catch (err: any) {
+            setImportResult(`[err]导入失败：${err?.message || err}`);
+        } finally {
+            setImporting(false);
         }
     };
 
@@ -3473,11 +3516,11 @@ create table if not exists memory_vectors (
                     </button>
                 </div>
 
-                {/* 导出记忆：接入外置记忆库 */}
+                {/* 导出 / 导入记忆：接入外置记忆库、跨设备迁移 */}
                 <div style={{ marginTop: 16, background: '#eff6ff', borderRadius: 16, padding: 16, border: '1px solid #bfdbfe' }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: '#1e40af', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                         <Icon name="download" size={14} />
-                        <span>导出记忆（接入外置记忆库）</span>
+                        <span>导出 / 导入记忆</span>
                     </div>
                     <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 12, lineHeight: 1.6 }}>
                         把 <b>{char.name}</b> 记忆宫殿里的全部记忆导出成 JSON：含每条记忆的正文、房间、重要性、情绪、标签、时间，
@@ -3528,6 +3571,45 @@ create table if not exists memory_vectors (
                             </span>
                         )}
                     </button>
+
+                    {/* 导入：把导出的 JSON 合并回当前角色（跨设备迁移 / 恢复） */}
+                    <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #dbeafe' }}>
+                        <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 10, lineHeight: 1.6 }}>
+                            把之前导出的 JSON 合并进 <b>{char.name}</b> 的记忆宫殿（追加，不覆盖现有记忆）。
+                            用于跨设备迁移或恢复。
+                        </div>
+
+                        {importResult && (
+                            <div style={{ fontSize: 12, marginBottom: 8, color: importResult.startsWith('[err]') ? '#dc2626' : importResult.startsWith('[warn]') ? '#d97706' : '#16a34a' }}>
+                                <StatusMessage msg={importResult} />
+                            </div>
+                        )}
+
+                        <input
+                            ref={importInputRef}
+                            type="file"
+                            accept="application/json,.json"
+                            onChange={handleImportFile}
+                            style={{ display: 'none' }}
+                        />
+                        <button
+                            onClick={() => importInputRef.current?.click()}
+                            disabled={importing}
+                            style={{
+                                width: '100%', padding: '10px 0', borderRadius: 12,
+                                border: '1px solid #bfdbfe', fontWeight: 700, fontSize: 13,
+                                color: '#1d4ed8', background: 'white',
+                                cursor: importing ? 'not-allowed' : 'pointer',
+                            }}
+                        >
+                            {importing ? '导入中…' : (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                                    <Icon name="document" size={13} />
+                                    <span>从 JSON 导入</span>
+                                </span>
+                            )}
+                        </button>
+                    </div>
                 </div>
                 </>)}
 
