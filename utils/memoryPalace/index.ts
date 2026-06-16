@@ -70,3 +70,7 @@ export {
 // 一键清空（本地 + 云端）
 export { wipeAllMemoryPalace } from './wipe';
 export type { WipeResult } from './wipe';
+
+// 导出（接入外置记忆库用）
+export { exportMemoryPalace } from './export';
+export type { MemoryPalaceExportFile, CharacterMemoryPalaceExport } from './export';

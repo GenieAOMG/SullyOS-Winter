@@ -8,6 +8,7 @@ import {
     manuallyBindMemories, removeMemoryFromBox, unbindAllLiveMemories,
     reviveArchivedMemory,
     wipeAllMemoryPalace,
+    exportMemoryPalace,
 } from '../utils/memoryPalace';
 import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox } from '../utils/memoryPalace';
 import type { Message } from '../types';
@@ -464,6 +465,10 @@ export default function MemoryPalaceApp() {
     // 一键清空
     const [wiping, setWiping] = useState(false);
     const [wipeResult, setWipeResult] = useState<string | null>(null);
+
+    // 导出记忆（接入外置记忆库）
+    const [exporting, setExporting] = useState(false);
+    const [exportResult, setExportResult] = useState<string | null>(null);
 
     // 关联记忆状态（记忆详情页展示 EventBox 兄弟 + 兼容展示遗留 causal link）
     const [linkedMemories, setLinkedMemories] = useState<LinkedMemoryUI[]>([]);
@@ -1434,6 +1439,40 @@ export default function MemoryPalaceApp() {
             setWipeResult(`[err]清空失败：${e?.message || e}`);
         } finally {
             setWiping(false);
+        }
+    };
+
+    /** 导出当前角色的记忆宫殿为 JSON 文件（接入外置记忆库）。
+     *  含记忆节点 / 事件盒 / 期盼，不含向量（向量与 embedding 模型强绑定，外置库无意义）。 */
+    const handleExportMemories = async () => {
+        if (!char) return;
+        setExporting(true);
+        setExportResult(null);
+        try {
+            const data = await exportMemoryPalace([{ id: char.id, name: char.name }]);
+            const nodeCount = data.characters[0]?.counts.nodes ?? 0;
+            if (nodeCount === 0) {
+                setExportResult('[warn]当前角色还没有记忆宫殿节点，没什么可导出的');
+                return;
+            }
+            const json = JSON.stringify(data, null, 2);
+            const safeName = (char.name || 'character').replace(/[\\/:*?"<>|]/g, '_');
+            const fileName = `${safeName}_记忆宫殿_${new Date().toISOString().slice(0, 10)}.json`;
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            const { eventBoxes, anticipations } = data.characters[0].counts;
+            setExportResult(`[ok]已导出 ${nodeCount} 条记忆、${eventBoxes} 个事件盒、${anticipations} 个期盼`);
+        } catch (e: any) {
+            setExportResult(`[err]导出失败：${e?.message || e}`);
+        } finally {
+            setExporting(false);
         }
     };
 
@@ -3425,6 +3464,46 @@ create table if not exists memory_vectors (
                         }}
                     >
                         {digesting ? `${char.name}正在静静地回想…` : '手动触发消化'}
+                    </button>
+                </div>
+
+                {/* 导出记忆：接入外置记忆库 */}
+                <div style={{ marginTop: 16, background: '#eff6ff', borderRadius: 16, padding: 16, border: '1px solid #bfdbfe' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#1e40af', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Icon name="download" size={14} />
+                        <span>导出记忆（接入外置记忆库）</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 12, lineHeight: 1.6 }}>
+                        把 <b>{char.name}</b> 记忆宫殿里的全部记忆导出成 JSON：含每条记忆的正文、房间、重要性、情绪、标签、时间，
+                        以及事件盒（整合回忆）和窗台期盼。<br/>
+                        <span style={{ color: '#9ca3af' }}>
+                            不含向量（向量与 embedding 模型强绑定、体积大，外置库需要时自行重新向量化即可）。
+                        </span>
+                    </div>
+
+                    {exportResult && (
+                        <div style={{ fontSize: 12, marginBottom: 8, color: exportResult.startsWith('[err]') ? '#dc2626' : exportResult.startsWith('[warn]') ? '#d97706' : '#16a34a' }}>
+                            <StatusMessage msg={exportResult} />
+                        </div>
+                    )}
+
+                    <button
+                        onClick={handleExportMemories}
+                        disabled={exporting}
+                        style={{
+                            width: '100%', padding: '10px 0', borderRadius: 12,
+                            border: 'none', fontWeight: 700, fontSize: 13,
+                            color: 'white',
+                            background: exporting ? '#d4d4d4' : '#2563eb',
+                            cursor: exporting ? 'not-allowed' : 'pointer',
+                        }}
+                    >
+                        {exporting ? '导出中…' : (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                                <Icon name="download" size={13} />
+                                <span>导出为 JSON</span>
+                            </span>
+                        )}
                     </button>
                 </div>
                 </>)}
