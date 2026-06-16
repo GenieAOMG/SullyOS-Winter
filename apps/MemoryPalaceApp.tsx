@@ -469,6 +469,8 @@ export default function MemoryPalaceApp() {
     // 导出记忆（接入外置记忆库）
     const [exporting, setExporting] = useState(false);
     const [exportResult, setExportResult] = useState<string | null>(null);
+    // 默认带上向量：多数用户长期用同一套 embedding 模型，向量可直接复用、免重新向量化
+    const [exportWithVectors, setExportWithVectors] = useState(true);
 
     // 关联记忆状态（记忆详情页展示 EventBox 兄弟 + 兼容展示遗留 causal link）
     const [linkedMemories, setLinkedMemories] = useState<LinkedMemoryUI[]>([]);
@@ -1449,8 +1451,12 @@ export default function MemoryPalaceApp() {
         setExporting(true);
         setExportResult(null);
         try {
-            const data = await exportMemoryPalace([{ id: char.id, name: char.name }]);
-            const nodeCount = data.characters[0]?.counts.nodes ?? 0;
+            const data = await exportMemoryPalace(
+                [{ id: char.id, name: char.name }],
+                { includeVectors: exportWithVectors },
+            );
+            const c = data.characters[0]?.counts;
+            const nodeCount = c?.nodes ?? 0;
             if (nodeCount === 0) {
                 setExportResult('[warn]当前角色还没有记忆宫殿节点，没什么可导出的');
                 return;
@@ -1467,8 +1473,8 @@ export default function MemoryPalaceApp() {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            const { eventBoxes, anticipations } = data.characters[0].counts;
-            setExportResult(`[ok]已导出 ${nodeCount} 条记忆、${eventBoxes} 个事件盒、${anticipations} 个期盼`);
+            const vecPart = exportWithVectors ? `、${c.vectors} 条向量` : '';
+            setExportResult(`[ok]已导出 ${nodeCount} 条记忆、${c.eventBoxes} 个事件盒、${c.anticipations} 个期盼${vecPart}`);
         } catch (e: any) {
             setExportResult(`[err]导出失败：${e?.message || e}`);
         } finally {
@@ -3475,11 +3481,28 @@ create table if not exists memory_vectors (
                     </div>
                     <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 12, lineHeight: 1.6 }}>
                         把 <b>{char.name}</b> 记忆宫殿里的全部记忆导出成 JSON：含每条记忆的正文、房间、重要性、情绪、标签、时间，
-                        以及事件盒（整合回忆）和窗台期盼。<br/>
-                        <span style={{ color: '#9ca3af' }}>
-                            不含向量（向量与 embedding 模型强绑定、体积大，外置库需要时自行重新向量化即可）。
-                        </span>
+                        以及事件盒（整合回忆）和窗台期盼。
                     </div>
+
+                    {/* 是否带向量：长期用同一 embedding 模型就勾上，向量可直接复用免重新向量化 */}
+                    <label style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer',
+                        marginBottom: 12, fontSize: 11, color: '#334155', lineHeight: 1.6,
+                    }}>
+                        <input
+                            type="checkbox"
+                            checked={exportWithVectors}
+                            onChange={e => setExportWithVectors(e.target.checked)}
+                            style={{ marginTop: 2, flexShrink: 0, cursor: 'pointer' }}
+                        />
+                        <span>
+                            <b>同时导出向量</b>（推荐）<br/>
+                            <span style={{ color: '#64748b' }}>
+                                继续用<b>同一个 embedding 模型</b>时向量可直接复用，免重新向量化、检索结果一致；
+                                换模型则无效。取消勾选只导文本结构，文件更小。
+                            </span>
+                        </span>
+                    </label>
 
                     {exportResult && (
                         <div style={{ fontSize: 12, marginBottom: 8, color: exportResult.startsWith('[err]') ? '#dc2626' : exportResult.startsWith('[warn]') ? '#d97706' : '#16a34a' }}>

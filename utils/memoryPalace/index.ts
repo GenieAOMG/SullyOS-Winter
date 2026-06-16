@@ -73,4 +73,4 @@ export type { WipeResult } from './wipe';
 
 // 导出（接入外置记忆库用）
 export { exportMemoryPalace } from './export';
-export type { MemoryPalaceExportFile, CharacterMemoryPalaceExport } from './export';
+export type { MemoryPalaceExportFile, CharacterMemoryPalaceExport, ExportedVector } from './export';
