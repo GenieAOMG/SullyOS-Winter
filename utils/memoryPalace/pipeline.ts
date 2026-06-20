@@ -1189,67 +1189,39 @@ function makeSkipResult(reason: 'lock' | 'hot_zone' | 'threshold'): PipelineResu
     return { stored: 0, skipped: 0, memories: [], batches: [], skipReason: reason };
 }
 
-export async function processNewMessages(
-    _allRecentMessages: Message[], // 保留参数兼容，但内部直接从 DB 加载
+/** extractAndStoreMemories 的产出：供 caller 决定是否更新水位线 / 跑副作用 */
+interface ExtractCoreResult {
+    /** 向量化真正存库的条数 */
+    stored: number;
+    /** 因语义去重跳过的条数 */
+    skipped: number;
+    /** 本轮提取出的全部记忆节点（去重命中的不入库，但仍在此数组里——建链按库实存过滤，安全） */
+    memories: import('./types').MemoryNode[];
+    batches: PipelineResult['batches'];
+    crossTimeLinks: { newMemoryId: string; existingMemoryId: string }[];
+    eventBoxHints: import('./extraction').EventBoxHint[];
+    corrections: { targetId: string; note: string }[];
+}
+
+/**
+ * 核心：把一批消息 → 构建上下文 → LLM 提取 → 向量化入库。
+ *
+ * 从 processNewMessages 抽出，供「自动缓冲区总结」与「手动区间总结」两条路径共用。
+ * **不碰水位线、不做自动归档**——这些是 caller（路径专属）的职责。
+ *
+ * @param skipDedup true=不去重（自动路径：消息靠水位线保证不重复处理，cosine 去重误伤大）；
+ *                  false=去重（手动保底路径：用户可能重复总结同一区间，靠去重避免刷出重复记忆）
+ */
+async function extractAndStoreMemories(
+    toProcess: Message[],
     charId: string,
     charName: string,
     embeddingConfig: EmbeddingConfig,
     llmConfig: LightLLMConfig,
-    userName: string = '',
-    /** 强制模式：跳过缓冲区阈值检查，用于一键向量化 */
-    force: boolean = false,
-    /** 进度回调：通知调用方当前阶段 */
-    onProgress?: (stage: string) => void,
-): Promise<PipelineResult | null> {
-    // 并发锁：同一角色同时只能跑一次
-    if (processingLocks.has(charId)) {
-        console.log(`🏰 [Pipeline] 跳过：${charName} 已有处理任务在运行`);
-        return makeSkipResult('lock');
-    }
-    processingLocks.add(charId);
-
-    try {
-        // 1. 加载全部消息（含已处理的），计算热区和缓冲区
-        //    过滤：保留任何有语义的消息类型（text / score_card / system / transfer / interaction），
-        //    只排除纯视觉/音频类（image / emoji / voice）—— 后者经 normalize 变短占位，对 LLM 无增益
-        const allMessages = await DB.getMessagesByCharId(charId, true);
-        const textMessages = allMessages
-            .filter(m => isMessageSemanticallyRelevant(m))
-            .sort((a, b) => a.id - b.id);
-
-        const totalCount = textMessages.length;
-
-        if (totalCount <= HOT_ZONE_SIZE) {
-            console.log(`🏰 [Pipeline] 跳过：消息总数 ${totalCount} <= 热区 ${HOT_ZONE_SIZE}，无需处理`);
-            return makeSkipResult('hot_zone');
-        }
-
-        // 2. 热区 = 最后 HOT_ZONE_SIZE 条
-        const hotZoneStartIdx = totalCount - HOT_ZONE_SIZE;
-        const hotZoneStartId = textMessages[hotZoneStartIdx].id;
-
-        // 3. 缓冲区 = 高水位标记之后、热区之前
-        const lastProcessedId = getLastProcessedId(charId);
-        const buffer = textMessages.filter(m => m.id > lastProcessedId && m.id < hotZoneStartId);
-
-        const minThreshold = force ? 10 : BUFFER_THRESHOLD;
-        if (buffer.length < minThreshold) {
-            console.log(`🏰 [Pipeline] 跳过：缓冲区 ${buffer.length} 条 < 阈值 ${minThreshold}（hwm=${lastProcessedId}, hotZone起始id=${hotZoneStartId}）`);
-            return makeSkipResult('threshold');
-        }
-
-        // 4. 取前 85% 处理，保留尾部 15%
-        const processCount = Math.ceil(buffer.length * PROCESS_RATIO);
-        const toProcess = buffer.slice(0, processCount);
-        const keptTail = buffer.length - processCount;
-
-        if (toProcess.length === 0) return makeSkipResult('threshold');
-
-        console.log(`🏰 [Pipeline] 开始处理缓冲区：${toProcess.length} 条消息（保留尾部 ${keptTail} 条）`);
-        console.log(`🏰 [Pipeline]   消息ID范围: ${toProcess[0].id} ~ ${toProcess[toProcess.length - 1].id}`);
-        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 热区: ${HOT_ZONE_SIZE}, 缓冲区: ${buffer.length}, hwm: ${lastProcessedId}`);
-        onProgress?.(`正在整理 ${toProcess.length} 条对话...`);
-
+    userName: string,
+    onProgress: ((stage: string) => void) | undefined,
+    skipDedup: boolean,
+): Promise<ExtractCoreResult> {
         // 5. 构建精简上下文：角色档案 + 用户档案 + 相关已有记忆
         let charContext = '';
         let relatedMemoryRefs: RelatedMemoryRef[] = [];
@@ -1393,12 +1365,12 @@ export async function processNewMessages(
 
         if (memories.length === 0) {
             console.warn(`🏰 [Pipeline] 所有批次共提取 0 条记忆（${toProcess.length} 条消息），不更新高水位，下次重试`);
-            return { stored: 0, skipped: 0, memories: [], batches: batchResults };
+            return { stored: 0, skipped: 0, memories: [], batches: batchResults, crossTimeLinks: allCrossTimeLinks, eventBoxHints: allEventBoxHints, corrections: allCorrections };
         }
 
         console.log(`🏰 [Pipeline] 提取完成：${chunks.length} 批共 ${memories.length} 条记忆`);
 
-        // 7. 检测 embedding 模型是否变更，如果变了则重建所有已有向量
+        // 7b. 检测 embedding 模型是否变更，如果变了则重建所有已有向量
         try {
             const consistency = await checkModelConsistency(charId, embeddingConfig.model);
             if (consistency === 'mismatch') {
@@ -1410,42 +1382,40 @@ export async function processNewMessages(
             console.warn(`🔄 [Pipeline] 模型一致性检查失败（不影响新记忆存储）: ${e.message}`);
         }
 
-        // 8. 向量化（Embedding API，按批次）
-        //    向量化失败则不更新高水位，下次重试 LLM 会重新提取。
-        //    skipDedup=true：聊天总结里"上周担心工作 / 这周担心工作"cosine 完全可能 > 0.9
-        //    但是两件不同时间的事，cosine 去重会精准误杀；而 high-water-mark 已保证
-        //    消息不会被重复处理，去重在这条路径上收益小、误伤大。
+        // 8. 向量化（Embedding API，按批次）。向量化失败 → stored=0，caller 据此决定不更新水位。
         console.log(`🏰 [Pipeline] 开始向量化 ${memories.length} 条记忆...`);
         onProgress?.(`正在向量化 ${memories.length} 条记忆...`);
-        const vectorResult = await vectorizeAndStore(memories, embeddingConfig, getRemoteVectorConfig(), { skipDedup: true });
+        const vectorResult = await vectorizeAndStore(memories, embeddingConfig, getRemoteVectorConfig(), { skipDedup });
         console.log(`🏰 [Pipeline] 向量化完成：${vectorResult.stored} 条存储, ${vectorResult.skipped} 条去重跳过`);
 
-        // 9. 只有真的存成功了才更新高水位
-        if (vectorResult.stored === 0) {
-            console.warn(`🏰 [Pipeline] 向量化后 0 条存储成功，不更新高水位`);
-            return { stored: 0, skipped: vectorResult.skipped, memories: [], batches: batchResults };
-        }
-        const newHighWaterMark = toProcess[toProcess.length - 1].id;
-        setLastProcessedId(charId, newHighWaterMark);
-        console.log(`✅ [Pipeline] 缓冲区处理完成：${vectorResult.stored} 条记忆, hwm ${lastProcessedId} → ${newHighWaterMark}`);
-        onProgress?.(`记忆整理完成！新增 ${vectorResult.stored} 条记忆`);
-
-        // 9b. 自动归档建议：按日期 group 新记忆 → YAML bullets → 合成 MemoryFragment
-        //     caller（useChatAI / Chat）拿到后做"同日期 merge 进 char.memories + 推 hideBeforeMessageId"
-        //     这条路径让 palace 成功后自动同步到传统归档+聊天水位线
-        //     零 LLM 调用——风格化已经在 palace extraction 那次 LLM 调用里完成
-        const autoArchive = buildAutoArchiveFragments(memories, newHighWaterMark);
-
-        // 构建返回结果
-        const pipelineResult: PipelineResult = {
+        return {
             stored: vectorResult.stored,
             skipped: vectorResult.skipped,
-            processedMessages: toProcess.length,
-            memories: memories.map(m => ({ content: m.content, room: m.room, importance: m.importance, mood: m.mood, tags: m.tags })),
+            memories,
             batches: batchResults,
-            autoArchive,
+            crossTimeLinks: allCrossTimeLinks,
+            eventBoxHints: allEventBoxHints,
+            corrections: allCorrections,
         };
+}
 
+/**
+ * 核心：记忆入库后的副作用——建链 / EventBox 绑定+压缩 / 应用纠正 / 巩固。
+ *
+ * 从 processNewMessages 抽出，自动路径与手动路径共用。每一步独立 try/catch，
+ * 失败不影响已保存的记忆。
+ */
+async function applyMemorySideEffects(
+    charId: string,
+    charName: string,
+    memories: import('./types').MemoryNode[],
+    crossTimeLinks: { newMemoryId: string; existingMemoryId: string }[],
+    eventBoxHints: import('./extraction').EventBoxHint[],
+    corrections: { targetId: string; note: string }[],
+    embeddingConfig: EmbeddingConfig,
+    llmConfig: LightLLMConfig,
+    userName: string,
+): Promise<void> {
         // 10. 建关联（仅规则，不调 LLM，省钱）— 失败不影响已保存的记忆
         try {
             const existingNodes = await MemoryNodeDB.getByCharId(charId);
@@ -1460,12 +1430,12 @@ export async function processNewMessages(
         // 10b. EventBox 绑定：把 LLM 标注的 relatedTo 转为 EventBox 收纳
         //      （旧逻辑：转 causal MemoryLink 已废弃，让位给更强的 EventBox 机制）
         const touchedBoxIds = new Set<string>();
-        if (allCrossTimeLinks.length > 0) {
+        if (crossTimeLinks.length > 0) {
             try {
                 const { bindMemoriesIntoEventBox } = await import('./eventBox');
-                const touched = await bindMemoriesIntoEventBox(charId, allCrossTimeLinks, allEventBoxHints);
+                const touched = await bindMemoriesIntoEventBox(charId, crossTimeLinks, eventBoxHints);
                 for (const id of touched) touchedBoxIds.add(id);
-                console.log(`📦 [Pipeline] EventBox 绑定：${allCrossTimeLinks.length} 条关联 → 触达 ${touched.size} 个事件盒`);
+                console.log(`📦 [Pipeline] EventBox 绑定：${crossTimeLinks.length} 条关联 → 触达 ${touched.size} 个事件盒`);
             } catch (e: any) {
                 console.warn(`📦 [Pipeline] EventBox 绑定失败（不影响已保存记忆）: ${e.message}`);
             }
@@ -1486,11 +1456,11 @@ export async function processNewMessages(
         //     追加一行"（YYYY-MM-DD 纠正：xxx）"，重新向量化即可。下次召回时 LLM
         //     看到带纠正标签的内容会自然采用新版本。
         //     放在压缩之后：避免刚改完 content 的节点被同轮压缩当 live 节点吞掉。
-        if (allCorrections.length > 0) {
+        if (corrections.length > 0) {
             try {
                 // 同一目标多次纠正：合并成一条多分号 note，避免追加多次
                 const merged = new Map<string, string[]>();
-                for (const c of allCorrections) {
+                for (const c of corrections) {
                     const arr = merged.get(c.targetId) || [];
                     arr.push(c.note);
                     merged.set(c.targetId, arr);
@@ -1536,12 +1506,219 @@ export async function processNewMessages(
         } catch (e: any) {
             console.warn(`🏰 [Pipeline] 巩固失败（不影响已保存记忆）: ${e.message}`);
         }
+}
+
+export async function processNewMessages(
+    _allRecentMessages: Message[], // 保留参数兼容，但内部直接从 DB 加载
+    charId: string,
+    charName: string,
+    embeddingConfig: EmbeddingConfig,
+    llmConfig: LightLLMConfig,
+    userName: string = '',
+    /** 强制模式：跳过缓冲区阈值检查，用于一键向量化 */
+    force: boolean = false,
+    /** 进度回调：通知调用方当前阶段 */
+    onProgress?: (stage: string) => void,
+): Promise<PipelineResult | null> {
+    // 并发锁：同一角色同时只能跑一次
+    if (processingLocks.has(charId)) {
+        console.log(`🏰 [Pipeline] 跳过：${charName} 已有处理任务在运行`);
+        return makeSkipResult('lock');
+    }
+    processingLocks.add(charId);
+
+    try {
+        // 1. 加载全部消息（含已处理的），计算热区和缓冲区
+        //    过滤：保留任何有语义的消息类型（text / score_card / system / transfer / interaction），
+        //    只排除纯视觉/音频类（image / emoji / voice）—— 后者经 normalize 变短占位，对 LLM 无增益
+        const allMessages = await DB.getMessagesByCharId(charId, true);
+        const textMessages = allMessages
+            .filter(m => isMessageSemanticallyRelevant(m))
+            .sort((a, b) => a.id - b.id);
+
+        const totalCount = textMessages.length;
+
+        if (totalCount <= HOT_ZONE_SIZE) {
+            console.log(`🏰 [Pipeline] 跳过：消息总数 ${totalCount} <= 热区 ${HOT_ZONE_SIZE}，无需处理`);
+            return makeSkipResult('hot_zone');
+        }
+
+        // 2. 热区 = 最后 HOT_ZONE_SIZE 条
+        const hotZoneStartIdx = totalCount - HOT_ZONE_SIZE;
+        const hotZoneStartId = textMessages[hotZoneStartIdx].id;
+
+        // 3. 缓冲区 = 高水位标记之后、热区之前
+        const lastProcessedId = getLastProcessedId(charId);
+        const buffer = textMessages.filter(m => m.id > lastProcessedId && m.id < hotZoneStartId);
+
+        const minThreshold = force ? 10 : BUFFER_THRESHOLD;
+        if (buffer.length < minThreshold) {
+            console.log(`🏰 [Pipeline] 跳过：缓冲区 ${buffer.length} 条 < 阈值 ${minThreshold}（hwm=${lastProcessedId}, hotZone起始id=${hotZoneStartId}）`);
+            return makeSkipResult('threshold');
+        }
+
+        // 4. 取前 85% 处理，保留尾部 15%
+        const processCount = Math.ceil(buffer.length * PROCESS_RATIO);
+        const toProcess = buffer.slice(0, processCount);
+        const keptTail = buffer.length - processCount;
+
+        if (toProcess.length === 0) return makeSkipResult('threshold');
+
+        console.log(`🏰 [Pipeline] 开始处理缓冲区：${toProcess.length} 条消息（保留尾部 ${keptTail} 条）`);
+        console.log(`🏰 [Pipeline]   消息ID范围: ${toProcess[0].id} ~ ${toProcess[toProcess.length - 1].id}`);
+        console.log(`🏰 [Pipeline]   总消息: ${totalCount}, 热区: ${HOT_ZONE_SIZE}, 缓冲区: ${buffer.length}, hwm: ${lastProcessedId}`);
+        onProgress?.(`正在整理 ${toProcess.length} 条对话...`);
+
+        // 5–8. 构建上下文 → LLM 提取 → 向量化（共用 extractAndStoreMemories）。
+        //       skipDedup=true：聊天总结里"上周担心工作 / 这周担心工作"cosine 完全可能 > 0.9
+        //       但是两件不同时间的事，cosine 去重会精准误杀；而 high-water-mark 已保证
+        //       消息不会被重复处理，去重在这条路径上收益小、误伤大。
+        const core = await extractAndStoreMemories(
+            toProcess, charId, charName, embeddingConfig, llmConfig, userName, onProgress, true,
+        );
+
+        if (core.memories.length === 0) {
+            // helper 内已打印"提取 0 条"日志
+            return { stored: 0, skipped: 0, memories: [], batches: core.batches };
+        }
+
+        // 9. 只有真的存成功了才更新高水位
+        if (core.stored === 0) {
+            console.warn(`🏰 [Pipeline] 向量化后 0 条存储成功，不更新高水位`);
+            return { stored: 0, skipped: core.skipped, memories: [], batches: core.batches };
+        }
+        const newHighWaterMark = toProcess[toProcess.length - 1].id;
+        setLastProcessedId(charId, newHighWaterMark);
+        console.log(`✅ [Pipeline] 缓冲区处理完成：${core.stored} 条记忆, hwm ${lastProcessedId} → ${newHighWaterMark}`);
+        onProgress?.(`记忆整理完成！新增 ${core.stored} 条记忆`);
+
+        // 9b. 自动归档建议：按日期 group 新记忆 → YAML bullets → 合成 MemoryFragment
+        //     caller（useChatAI / Chat）拿到后做"同日期 merge 进 char.memories + 推 hideBeforeMessageId"
+        //     这条路径让 palace 成功后自动同步到传统归档+聊天水位线
+        //     零 LLM 调用——风格化已经在 palace extraction 那次 LLM 调用里完成
+        const autoArchive = buildAutoArchiveFragments(core.memories, newHighWaterMark);
+
+        // 构建返回结果
+        const pipelineResult: PipelineResult = {
+            stored: core.stored,
+            skipped: core.skipped,
+            processedMessages: toProcess.length,
+            memories: core.memories.map(m => ({ content: m.content, room: m.room, importance: m.importance, mood: m.mood, tags: m.tags })),
+            batches: core.batches,
+            autoArchive,
+        };
+
+        // 10–11. 建链 / EventBox / 纠正 / 巩固（共用 applyMemorySideEffects）
+        await applyMemorySideEffects(
+            charId, charName, core.memories, core.crossTimeLinks, core.eventBoxHints, core.corrections,
+            embeddingConfig, llmConfig, userName,
+        );
 
         return pipelineResult;
 
     } catch (err: any) {
         console.error(`❌ [Pipeline] processNewMessages 失败 (charId=${charId}):`, err.message, err.stack?.split('\n')[1] || '');
         return null;
+    } finally {
+        processingLocks.delete(charId);
+    }
+}
+
+/** 手动区间总结的结果 */
+export interface RangeProcessResult {
+    stored: number;
+    skipped: number;
+    /** 区间内实际送 LLM 的消息条数 */
+    processedMessages: number;
+    memories: { content: string; room: string; importance: number; mood: string; tags: string[] }[];
+    batches: PipelineResult['batches'];
+    /**
+     * 失败/空跑原因：
+     * - 'lock'        该角色已有处理任务在跑（自动总结或另一次手动总结）
+     * - 'empty'       选定区间没有可处理的语义消息
+     * - 'no_memories' LLM 一条记忆都没提取出来
+     * - 其它字符串    异常信息
+     */
+    error?: 'lock' | 'empty' | 'no_memories' | string;
+}
+
+/**
+ * 手动区间总结与向量化（保底机制）。
+ *
+ * 用户在「手动总结与向量化」面板里圈定 [fromMsgId, toMsgId] 区间，这条路径：
+ *   - **完全不读、不写水位线**（mp_lastMsgId_*）—— 和自动总结井水不犯河水，
+ *     重复跑同一区间也不会"吃掉"消息、不会打乱自动总结进度；
+ *   - **开启去重**（skipDedup=false）—— 用户可能重复总结已总结过的区间（"不知道上次成没成"），
+ *     去重保证不会刷出一堆重复记忆，stored/skipped 也如实反馈"这次新增几条 / 几条早就有了"；
+ *   - 不做自动归档（buildAutoArchiveFragments）—— 那条路径会推聊天水位线/隐藏消息，与"不碰水位线"冲突。
+ *
+ * 与 processNewMessages 共用 extractAndStoreMemories + applyMemorySideEffects，
+ * 提取质量、建链、EventBox、巩固逻辑完全一致。
+ */
+export async function processMessageRange(
+    charId: string,
+    charName: string,
+    embeddingConfig: EmbeddingConfig,
+    llmConfig: LightLLMConfig,
+    fromMsgId: number,
+    toMsgId: number,
+    userName: string = '',
+    onProgress?: (stage: string) => void,
+): Promise<RangeProcessResult> {
+    // 复用同一把并发锁：避免和自动总结 / 另一次手动总结同时写同角色记忆产生竞态
+    if (processingLocks.has(charId)) {
+        console.log(`🏰 [Pipeline] 手动区间总结跳过：${charName} 已有处理任务在运行`);
+        return { stored: 0, skipped: 0, processedMessages: 0, memories: [], batches: [], error: 'lock' };
+    }
+    processingLocks.add(charId);
+
+    try {
+        const lo = Math.min(fromMsgId, toMsgId);
+        const hi = Math.max(fromMsgId, toMsgId);
+
+        // 加载全部消息（含已处理的），取区间内的语义相关消息，按 id 升序
+        const allMessages = await DB.getMessagesByCharId(charId, true);
+        const toProcess = allMessages
+            .filter(m => isMessageSemanticallyRelevant(m))
+            .filter(m => m.id >= lo && m.id <= hi)
+            .sort((a, b) => a.id - b.id);
+
+        if (toProcess.length === 0) {
+            console.log(`🏰 [Pipeline] 手动区间总结：区间 [${lo}, ${hi}] 内没有可处理的消息`);
+            return { stored: 0, skipped: 0, processedMessages: 0, memories: [], batches: [], error: 'empty' };
+        }
+
+        console.log(`🏰 [Pipeline] 手动区间总结开始：${toProcess.length} 条消息（id ${toProcess[0].id} ~ ${toProcess[toProcess.length - 1].id}），不碰水位线`);
+        onProgress?.(`正在整理 ${toProcess.length} 条对话...`);
+
+        // 提取 + 向量化（去重开启）
+        const core = await extractAndStoreMemories(
+            toProcess, charId, charName, embeddingConfig, llmConfig, userName, onProgress, false,
+        );
+
+        if (core.memories.length === 0) {
+            return { stored: 0, skipped: 0, processedMessages: toProcess.length, memories: [], batches: core.batches, error: 'no_memories' };
+        }
+
+        // 关键：不更新水位线、不做自动归档。只跑入库后的副作用。
+        await applyMemorySideEffects(
+            charId, charName, core.memories, core.crossTimeLinks, core.eventBoxHints, core.corrections,
+            embeddingConfig, llmConfig, userName,
+        );
+
+        console.log(`✅ [Pipeline] 手动区间总结完成：新增 ${core.stored} 条，去重跳过 ${core.skipped} 条（水位线未改动）`);
+        onProgress?.(`完成！新增 ${core.stored} 条记忆${core.skipped > 0 ? `，${core.skipped} 条因重复跳过` : ''}`);
+
+        return {
+            stored: core.stored,
+            skipped: core.skipped,
+            processedMessages: toProcess.length,
+            memories: core.memories.map(m => ({ content: m.content, room: m.room, importance: m.importance, mood: m.mood, tags: m.tags })),
+            batches: core.batches,
+        };
+    } catch (err: any) {
+        console.error(`❌ [Pipeline] processMessageRange 失败 (charId=${charId}):`, err.message, err.stack?.split('\n')[1] || '');
+        return { stored: 0, skipped: 0, processedMessages: 0, memories: [], batches: [], error: err.message || '未知错误' };
     } finally {
         processingLocks.delete(charId);
     }
