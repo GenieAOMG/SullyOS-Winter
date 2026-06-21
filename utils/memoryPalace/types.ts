@@ -173,7 +173,7 @@ export const EVENT_BOX_SEAL_THRESHOLD = 12;
 
 /** summary 目标字数（prompt 引导）+ 硬上限（超过强制截断） */
 export const EVENT_BOX_SUMMARY_TARGET_CHARS = 500;
-export const EVENT_BOX_SUMMARY_HARD_MAX_CHARS = 800;
+export const EVENT_BOX_SUMMARY_HARD_MAX_CHARS = 1200;
 
 // ─── 旧话题盒（已废弃，代码路径已摘除，类型保留以兼容残留数据读取） ──
 
