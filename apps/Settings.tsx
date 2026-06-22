@@ -2,9 +2,10 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useOS } from '../context/OSContext';
 import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { safeResponseJson } from '../utils/safeApi';
+import { EXPORT_CHUNK_SIZE, sliceRanges } from '../utils/backupExport';
 import Modal from '../components/os/Modal';
 import { NotionManager, FeishuManager } from '../utils/realtimeContext';
 import { XhsMcpClient } from '../utils/xhsMcpClient';
@@ -322,7 +323,20 @@ const Settings: React.FC = () => {
 
   // For web download link
   const [downloadUrl, setDownloadUrl] = useState<string>('');
-  
+  // 用 ref 跟住当前的 object URL，关弹窗 / 重新导出 / 卸载时都能 revoke 到最新那个，
+  // 不受 state 闭包过期影响。
+  const downloadUrlRef = useRef<string>('');
+  const revokeDownloadUrl = useCallback(() => {
+      if (downloadUrlRef.current) {
+          URL.revokeObjectURL(downloadUrlRef.current);
+          downloadUrlRef.current = '';
+      }
+      setDownloadUrl('');
+  }, []);
+  useEffect(() => () => {
+      if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
+  }, []);
+
   const [statusMsg, setStatusMsg] = useState('');
   const [testingApi, setTestingApi] = useState(false);
   const [testApiResult, setTestApiResult] = useState<string | null>(null);
@@ -435,38 +449,56 @@ const Settings: React.FC = () => {
           const blob = await exportSystem(mode);
           
           if (Capacitor.isNativePlatform()) {
-              // Convert Blob to Base64 for Native Write
-              const reader = new FileReader();
-              reader.readAsDataURL(blob);
-              reader.onloadend = async () => {
-                  const base64data = String(reader.result);
-                  const fileName = `Sully_Backup_${mode}_${Date.now()}.zip`;
-                  
-                  try {
-                      await Filesystem.writeFile({
-                          path: fileName,
-                          data: base64data, // Filesystem accepts data urls? Or need strip prefix
-                          directory: Directory.Cache,
-                      });
-                      const uriResult = await Filesystem.getUri({
-                          directory: Directory.Cache,
-                          path: fileName,
-                      });
-                      await Share.share({
-                          title: `Sully Backup`,
-                          files: [uriResult.uri],
-                      });
-                  } catch (e) {
-                      console.error("Native write failed", e);
-                      addToast("保存文件失败", "error");
+              // 手机端分片写盘：整包一次性 readAsDataURL 会把几十~上百 MB 的 base64
+              // 一股脑塞进内存，WebView 容易 OOM 闪退。改成按 3MiB 切片，每片转成纯
+              // base64 再 appendFile 追加。先写临时文件，全部写完才改名+分享；中途任何
+              // 一步失败都删掉残片，避免留下一个看着像成功、其实损坏的 .zip。
+              const fileName = `Sully_Backup_${mode}_${Date.now()}.zip`;
+              const tempName = `${fileName}.part`;
+
+              // 读一个 Blob 分片为纯 base64（去掉 data:...;base64, 前缀）。
+              const sliceToBase64 = (slice: Blob): Promise<string> => new Promise((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => {
+                      const result = String(reader.result);
+                      const comma = result.indexOf(',');
+                      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+                  };
+                  reader.onerror = () => reject(reader.error || new Error('读取备份分片失败'));
+                  reader.onabort = () => reject(new Error('读取备份分片被中断'));
+                  reader.readAsDataURL(slice);
+              });
+
+              try {
+                  const ranges = sliceRanges(blob.size, EXPORT_CHUNK_SIZE);
+                  for (let i = 0; i < ranges.length; i++) {
+                      const [start, end] = ranges[i];
+                      const base64 = await sliceToBase64(blob.slice(start, end));
+                      if (i === 0) {
+                          await Filesystem.writeFile({ path: tempName, data: base64, directory: Directory.Cache });
+                      } else {
+                          await Filesystem.appendFile({ path: tempName, data: base64, directory: Directory.Cache });
+                      }
                   }
-              };
+                  // 全部分片写盘成功，才把临时文件改名为正式名并分享。
+                  await Filesystem.rename({ from: tempName, to: fileName, directory: Directory.Cache });
+                  const uriResult = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
+                  await Share.share({ title: `Sully Backup`, files: [uriResult.uri] });
+              } catch (e) {
+                  console.error("Native write failed", e);
+                  // 尽力清掉写了一半的残片，别留下损坏文件。
+                  try { await Filesystem.deleteFile({ path: tempName, directory: Directory.Cache }); } catch { /* ignore */ }
+                  addToast("保存文件失败", "error");
+              }
           } else {
               // Web Download
+              // 上一次导出的 object URL 先 revoke 掉，否则它会一直占着整包内存直到刷新页面。
+              if (downloadUrlRef.current) URL.revokeObjectURL(downloadUrlRef.current);
               const url = URL.createObjectURL(blob);
+              downloadUrlRef.current = url;
               setDownloadUrl(url);
               setShowExportModal(true);
-              
+
               // Auto click
               const a = document.createElement('a');
               a.href = url;
@@ -1966,9 +1998,9 @@ const Settings: React.FC = () => {
       </Modal>
 
       {/* 强制导出 Modal */}
-      <Modal isOpen={showExportModal} title="备份下载" onClose={() => setShowExportModal(false)} footer={
+      <Modal isOpen={showExportModal} title="备份下载" onClose={() => { revokeDownloadUrl(); setShowExportModal(false); }} footer={
           <div className="flex gap-2 w-full">
-               <button onClick={() => setShowExportModal(false)} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">关闭</button>
+               <button onClick={() => { revokeDownloadUrl(); setShowExportModal(false); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">关闭</button>
           </div>
       }>
           <div className="space-y-4 text-center py-4">

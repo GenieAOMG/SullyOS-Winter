@@ -2,6 +2,7 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile } from '../types';
 import { DB } from '../utils/db';
+import { extractImagesInPlace, deepCloneForExport } from '../utils/backupExport';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler } from '../utils/vrWorld/scheduler';
 import { runVRSession } from '../utils/vrWorld/runSession';
@@ -2422,45 +2423,35 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               return obj;
           };
 
-          // Extract Images to ZIP (Recursive) - Used for Media/Theme Mode
-          const processObject = (obj: any): any => {
-              if (obj === null || typeof obj !== 'object') return obj;
-              
-              if (Array.isArray(obj)) {
-                  return obj.map(item => processObject(item));
+          // 把一条 data:image base64 落进 ZIP 的 assets/ 文件夹，返回它的 assets/* 路径。
+          // 同一份 base64 全局只存一份（assetDedupMap 按完整 base64 去重）；无法识别的
+          // data url 原样返回，不动它。
+          const resolveImage = (value: string): string => {
+              try {
+                  const cached = assetDedupMap.get(value);
+                  if (cached) return cached;
+                  const extMatch = value.match(/data:image\/([a-zA-Z0-9]+);base64,/);
+                  if (!extMatch) return value;
+                  const ext = extMatch[1] === 'jpeg' ? 'jpg' : extMatch[1];
+                  const filename = `asset_${Date.now()}_${assetCount++}.${ext}`;
+                  const base64Data = value.split(',')[1];
+                  assetsFolder?.file(filename, base64Data, { base64: true });
+                  const path = `assets/${filename}`;
+                  assetDedupMap.set(value, path);
+                  return path;
+              } catch (e) {
+                  console.warn("Failed to process asset", e);
+                  return value;
               }
+          };
 
-              const newObj: any = {};
-              for (const key in obj) {
-                  if (Object.prototype.hasOwnProperty.call(obj, key)) {
-                      let value = obj[key];
-                      if (typeof value === 'string' && value.startsWith('data:image/')) {
-                          try {
-                              const cached = assetDedupMap.get(value);
-                              if (cached) {
-                                  value = cached;
-                              } else {
-                                  const extMatch = value.match(/data:image\/([a-zA-Z0-9]+);base64,/);
-                                  if (extMatch) {
-                                      const ext = extMatch[1] === 'jpeg' ? 'jpg' : extMatch[1];
-                                      const filename = `asset_${Date.now()}_${assetCount++}.${ext}`;
-                                      const base64Data = value.split(',')[1];
-                                      assetsFolder?.file(filename, base64Data, { base64: true });
-                                      const path = `assets/${filename}`;
-                                      assetDedupMap.set(value, path);
-                                      value = path;
-                                  }
-                              }
-                          } catch (e) {
-                              console.warn("Failed to process asset", e);
-                          }
-                      } else {
-                          value = processObject(value);
-                      }
-                      newObj[key] = value;
-                  }
-              }
-              return newObj;
+          // Extract Images to ZIP (in-place) - Used for Media/Theme Mode.
+          // 原地把 base64 换成 assets/* 路径，不再另建一棵对象树，导出大 store 时峰值内存更省。
+          // 传进来的必须是独立副本：store 数据是 IDB 结构化克隆副本（安全）；theme /
+          // customIcons / appearancePresets 引用了运行态 state，已在上面 backupData 里深拷贝。
+          const processObject = (obj: any): any => {
+              extractImagesInPlace(obj, resolveImage);
+              return obj;
           };
 
           const isRedundantManagedAssetId = (id: string) => (
@@ -2508,6 +2499,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const sparkSocialProfile = await DB.getAsset('spark_social_profile');
           const roomCustomAssets = await DB.getAsset('room_custom_assets_list');
 
+          // theme / customIcons / appearancePresets 直接引用运行态 React state。只有
+          // media/full 会走 processObject 原地改，必须先深拷贝，否则会把正在用的系统主题改坏；
+          // text_only 走 stripBase64（返回新树、不改原对象），直接用引用即可，省掉一次
+          // 可能多达数 MB（壁纸 base64）的克隆。
+          const cloneForInPlace = <T,>(v: T): T => (mode === 'text_only' ? v : deepCloneForExport(v));
+
           const backupData: Partial<FullBackupData> = {
               timestamp: Date.now(),
               version: 3,
@@ -2516,12 +2513,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               availableModels: (mode === 'text_only' || mode === 'full') ? availableModels : undefined,
               realtimeConfig: (mode === 'text_only' || mode === 'full') ? realtimeConfig : undefined,
               memoryPalaceConfig: (mode === 'text_only' || mode === 'full') ? memoryPalaceConfig : undefined,
-              theme: theme, // Include theme in all modes (text/media)
+              theme: cloneForInPlace(theme), // Include theme in all modes (text/media)
               customIcons: (mode === 'text_only' || mode === 'media_only' || mode === 'full')
-                  ? { ...customIcons }
+                  ? cloneForInPlace(customIcons)
                   : undefined,
               appearancePresets: (mode === 'text_only' || mode === 'media_only' || mode === 'full')
-                  ? appearancePresets.map(p => ({ ...p }))
+                  ? cloneForInPlace(appearancePresets)
                   : undefined,
               
               socialAppData: (mode === 'text_only' || mode === 'media_only' || mode === 'full') ? {
@@ -2644,14 +2641,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const totalSteps = storesToProcess.length + 3;
           let currentStep = 0;
 
-          // Pre-process specialized image fields (Social App, Theme)
+          // Pre-process specialized image fields (Social App, Theme)。processObject 是
+          // 原地改，所以这里按语句调用、不接返回值，读起来就是「就地处理这个对象」。
           if (mode !== 'text_only') {
-              if (backupData.socialAppData?.userProfile) backupData.socialAppData.userProfile = processObject(backupData.socialAppData.userProfile);
-              if (backupData.socialAppData?.userBg) backupData.socialAppData.userBg = processObject(backupData.socialAppData.userBg);
-              if (backupData.roomCustomAssets) backupData.roomCustomAssets = processObject(backupData.roomCustomAssets);
-              if (backupData.theme) backupData.theme = processObject(backupData.theme);
-              if (backupData.customIcons) backupData.customIcons = processObject(backupData.customIcons);
-              if (backupData.appearancePresets) backupData.appearancePresets = processObject(backupData.appearancePresets);
+              if (backupData.socialAppData?.userProfile) processObject(backupData.socialAppData.userProfile);
+              if (backupData.socialAppData?.userBg) processObject(backupData.socialAppData.userBg);
+              if (backupData.roomCustomAssets) processObject(backupData.roomCustomAssets);
+              if (backupData.theme) processObject(backupData.theme);
+              if (backupData.customIcons) processObject(backupData.customIcons);
+              if (backupData.appearancePresets) processObject(backupData.appearancePresets);
           } else {
               // Strip images for text only
               if (backupData.socialAppData?.userProfile) backupData.socialAppData.userProfile = stripBase64(backupData.socialAppData.userProfile);
