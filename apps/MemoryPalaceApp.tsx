@@ -408,7 +408,7 @@ const labelClass = "text-[10px] font-bold text-slate-400 uppercase tracking-wide
 
 export default function MemoryPalaceApp() {
     const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast } = useOS();
-    const char = characters.find(c => c.id === activeCharacterId);
+    const char = characters.find(c => c.id === activeCharacterId)!;
 
     const [view, setView] = useState<'picker' | 'palace' | 'room' | 'memory' | 'settings' | 'globalSettings' | 'all' | 'boxes'>('picker');
     const [selectedRoom, setSelectedRoom] = useState<MemoryRoom | null>(null);
